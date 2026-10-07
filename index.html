@@ -188,7 +188,7 @@ async function verifyLicenseSerial(serial) {
     const valid = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, b64urlToBytes(parts[1]), new TextEncoder().encode(parts[0]));
     if (!valid) return { ok: false, reason: 'السيريال غير صالح (التوقيع غير مطابق)' };
     const data = JSON.parse(new TextDecoder().decode(b64urlToBytes(parts[0])));
-    if (data.p && data.p !== currentProjectRef()) return { ok: false, reason: 'هذا السيريال مخصّص لنسخة أخرى وليس لهذه النسخة', data };
+    if (data.p && data.p !== currentProjectRef()) return { ok: false, reason: `هذا السيريال صادر لنسخة أخرى (${data.p}) — وهذه النسخة رقمها (${currentProjectRef()}). أصدر سيريالاً جديداً برقم هذه النسخة.`, data };
     return { ok: true, data };
   } catch (e) {
     return { ok: false, reason: 'تعذّر قراءة السيريال' };
@@ -634,7 +634,7 @@ function renderLicenseExpiredScreen() {
       <div style="font-size:13.5px;color:#5F5E5A;line-height:1.7;margin-bottom:16px;">${msg}</div>
       ${info?.c ? `<div style="font-size:12px;color:#3A3826;margin-bottom:12px;">العميل: <b>${escapeHtml(info.c)}</b></div>` : ''}
       <textarea id="lic-serial" class="input mono" dir="ltr" rows="3" placeholder="الصق السيريال هنا" style="width:100%;font-size:11.5px;margin-bottom:10px;resize:vertical;"></textarea>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
+      <div id="lic-login" style="display:${state.licNeedLogin ? 'grid' : 'none'};grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
         <input id="lic-user" class="input" placeholder="اسم مستخدم المدير" autocomplete="username" />
         <input id="lic-pass" type="password" class="input" placeholder="كلمة المرور" autocomplete="current-password" />
       </div>
@@ -652,21 +652,42 @@ async function activateLicenseFromLockScreen() {
   const msgEl = document.getElementById('lic-msg');
   const say = (t, ok) => { msgEl.textContent = t; msgEl.style.color = ok ? '#0F6E56' : '#C0392B'; };
   const serial = document.getElementById('lic-serial').value.replace(/\s+/g, '');
-  const username = document.getElementById('lic-user').value.trim();
-  const password = document.getElementById('lic-pass').value;
+  const username = (document.getElementById('lic-user')?.value || '').trim();
+  const password = document.getElementById('lic-pass')?.value || '';
   if (!serial) return say('الصق السيريال أولاً');
   const r = await verifyLicenseSerial(serial);
   if (!r.ok) return say(r.reason);
   if (await serverToday() > r.data.e) return say(`هذا السيريال منتهي بتاريخ ${r.data.e}`);
-  if (!username || !password) return say('أدخل اسم مستخدم المدير وكلمة المرور لحفظ التفعيل');
+  const done = () => { say('✓ تم التفعيل بنجاح — جاري فتح النظام...', true); setTimeout(() => location.reload(), 900); };
+  // ① التفعيل بالسيريال فقط (دالة activate_license بقاعدة البيانات)
+  if (!username) {
+    say('جاري التفعيل...', true);
+    const { data, error } = await sb.rpc('activate_license', { p_serial: serial });
+    if (!error && data === 'ok') return done();
+    if (!error && data) return say(data);
+    // الدالة غير مثبّتة بهذه النسخة → نطلب دخول المدير (الطريقة القديمة)
+    state.licNeedLogin = true;
+    const box = document.getElementById('lic-login'); if (box) box.style.display = 'grid';
+    return say('أدخل اسم مستخدم المدير وكلمة المرور ثم اضغط تفعيل');
+  }
+  // ② بدخول المدير
   say('جاري التفعيل...', true);
   const email = username.includes('@') ? username : `${username.toLowerCase()}@retailapp-users.com`;
   const { error: loginErr } = await sb.auth.signInWithPassword({ email, password });
-  if (loginErr) return say('اسم المستخدم أو كلمة المرور غير صحيحة');
+  if (loginErr) {
+    const m = String(loginErr.message || '');
+    if (/confirm/i.test(m)) return say('✓ السيريال صحيح — لكن الحساب غير مؤكَّد: في Supabase افتح Authentication ← Users ← المستخدم ← Confirm email');
+    return say(`✓ السيريال صحيح — لكن تسجيل الدخول فشل: اسم المستخدم «${username}» أو كلمة المرور غير صحيحة`);
+  }
+  const { data: rpcData, error: rpcErr } = await sb.rpc('activate_license', { p_serial: serial });
+  if (!rpcErr && rpcData === 'ok') return done();
   const { data: upd, error } = await sb.from('license_settings').update({ serial, expiry_date: r.data.e }).eq('id', 1).select();
-  if (error || !upd || !upd.length) { await sb.auth.signOut(); return say('ما عندك صلاحية تفعيل النظام — لازم حساب مدير أو دعم فني'); }
-  say('✓ تم التفعيل بنجاح — جاري فتح النظام...', true);
-  setTimeout(() => location.reload(), 900);
+  if (error || !upd || !upd.length) {
+    await sb.auth.signOut();
+    return say(error ? ('✓ السيريال والدخول صحيحان — لكن تعذّر الحفظ: ' + error.message)
+                     : '✓ السيريال والدخول صحيحان — لكن هذا الحساب ليس مديراً (role = admin)');
+  }
+  done();
 }
 
 // ============================================
@@ -10408,10 +10429,13 @@ function emptyCrmForm() {
 // يُقرأ بالذاكرة فقط (متغيّر داخلي) ويختفي عند إغلاق الصفحة أو الضغط على «إزالة المفتاح».
 // =====================================================================
 let __serialSignKey = null;
+// نسخة المصمم الرئيسية — توليد السيريال يظهر فيها فقط (حتى لا يُصدَر سيريال بالخطأ من نسخة عميل)
+const MASTER_PROJECT_REF = 'cjwrizfjlgzhhyshdfjo';
+function isMasterCopy() { return currentProjectRef() === MASTER_PROJECT_REF; }
 function serialGenDefaults() {
   if (!state.serialGen) {
     const d = new Date(); d.setFullYear(d.getFullYear() + 1);
-    state.serialGen = { client: state.company?.name_ar || '', project: currentProjectRef(), expiry: d.toISOString().slice(0, 10), users: '0', trial: false, note: '', serial: '', msg: '', keyName: '' };
+    state.serialGen = { client: '', project: '', expiry: d.toISOString().slice(0, 10), users: '0', trial: false, note: '', serial: '', msg: '', keyName: '' };
   }
   return state.serialGen;
 }
@@ -10434,7 +10458,7 @@ function renderSerialGenTab() {
       <div style="display:grid;grid-template-columns:130px 1fr;gap:8px 10px;align-items:center;">
         <label style="font-size:12.5px;font-weight:700;">اسم العميل</label><input id="sg-client" class="input" value="${escapeHtml(g.client)}" />
         <label style="font-size:12.5px;font-weight:700;">رابط المشروع / ID</label>
-        <div style="display:flex;gap:6px;"><input id="sg-project" class="input mono" dir="ltr" value="${escapeHtml(g.project)}" /><button id="sg-this" class="btn" style="white-space:nowrap;padding:4px 10px;" title="هذه النسخة">هذه النسخة</button></div>
+        <div><input id="sg-project" class="input mono" dir="ltr" value="${escapeHtml(g.project)}" placeholder="رقم نسخة العميل — مثل kddckfvzrdfbpcafdmxk" /><div style="font-size:10.5px;color:#8B8A7A;margin-top:3px;">الرقم المكتوب أسفل شاشة تفعيل العميل (ID)</div></div>
         <label style="font-size:12.5px;font-weight:700;">المدة</label>
         <div style="display:flex;gap:5px;flex-wrap:wrap;">${chips.map(([k, l]) => `<button type="button" data-sg-period="${k}" class="btn" style="padding:4px 10px;font-size:12px;${k === 'trial' ? 'background:#FFF3C4;' : ''}">${l}</button>`).join('')}</div>
         <label style="font-size:12.5px;font-weight:700;">تاريخ الانتهاء</label><input id="sg-expiry" type="date" class="input mono" value="${escapeHtml(g.expiry)}" />
@@ -10494,7 +10518,8 @@ function bindSerialGenTab() {
     read();
     if (!__serialSignKey) { showToast('اختر ملف المفتاح أولاً', 'error'); return; }
     const ref = (() => { const v = String(g.project || '').trim(); try { if (v.includes('://')) return new URL(v).hostname.split('.')[0]; } catch (e) {} return v.split('.')[0]; })();
-    if (!g.client.trim() || !ref || !g.expiry) { showToast('عبّي اسم العميل ورابط المشروع وتاريخ الانتهاء', 'error'); return; }
+    if (!g.client.trim() || !ref || !g.expiry) { showToast('عبّي اسم العميل ورقم نسخته وتاريخ الانتهاء', 'error'); return; }
+    if (ref === currentProjectRef() && !confirm('⚠️ الرقم الذي كتبته هو رقم نسختك أنت وليس العميل.\nمتأكد تريد إصدار السيريال لنسختك؟')) return;
     const data = { v: 1, c: g.client.trim(), p: ref, e: g.expiry, u: Math.max(0, parseInt(g.users || '0', 10) || 0), i: new Date().toISOString().slice(0, 10), n: 'L' + Date.now().toString(36).toUpperCase() };
     if (g.trial) data.t = 1;
     g.serial = await signLicense(data); g.lastProject = ref; g.msg = '';
@@ -11109,7 +11134,7 @@ function renderBulkImportModal() {
 }
 
 function renderDesignerPanelModal() {
-  const tabs = ['عام', 'المحاسبة', 'الاشتراك', 'توليد سيريال', 'متابعة العملاء', 'التصفير الكامل'];
+  const tabs = ['عام', 'المحاسبة', 'الاشتراك', ...(isMasterCopy() ? ['توليد سيريال', 'متابعة العملاء'] : []), 'التصفير الكامل'];
   return `
   <div id="dp-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;padding:16px;z-index:30;">
     <div style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:640px;max-height:88vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.5);" onclick="event.stopPropagation()">
