@@ -5271,8 +5271,8 @@ function renderSalesFormModal() {
             <button id="si-import-quote" type="button" style="display:none;"></button>
           </div>
 
-          <label class="sx-lbl">رقم الفاتورة</label>
-          <input id="si-order-number" class="sx-in mono" style="text-align:center;" value="${escapeHtml(f.order_number||'')}" ${dis} />
+          <label class="sx-lbl" title="رقم اختياري تكتبه بيدك — مثلاً رقم دفتر الفواتير الورقي أو رقم طلب العميل. الرقم الأساسي للفاتورة هو «الرقم» فوق ويتولّد تلقائياً">الرقم اليدوي</label>
+          <input id="si-order-number" class="sx-in mono" style="text-align:center;" placeholder="اختياري" title="رقم اختياري — مثلاً رقم الدفتر الورقي أو رقم طلب العميل" value="${escapeHtml(f.order_number||'')}" ${dis} />
           <label class="sx-lbl">نوع الفاتورة</label>
           <select id="si-type" class="sx-in" style="max-width:120px;" ${dis}><option value="نقدي" ${f.invoice_type==='نقدي'?'selected':''}>${t('inv_cash')}</option><option value="آجل" ${f.invoice_type==='آجل'?'selected':''}>${t('inv_credit')}</option></select>
           <label class="sx-lbl">تاريخ الفاتورة</label>
