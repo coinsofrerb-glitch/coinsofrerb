@@ -1529,7 +1529,7 @@ async function loadQuotations() {
 function filteredQuotations() {
   const q = state.quotationQuery.trim().toLowerCase();
   let list = state.quotations;
-  if (q) list = list.filter(x => (x.quote_number||'').toLowerCase().includes(q) || (x.parties?.name||'').toLowerCase().includes(q));
+  if (q) list = list.filter(x => (x.quote_number||'').toLowerCase().includes(q) || (x.parties?.name||x.walkin_customer_name||'').toLowerCase().includes(q) || (x.walkin_customer_mobile||'').includes(q));
   if (state.quoteFilterCustomerId) list = list.filter(x => x.customer_id === state.quoteFilterCustomerId);
   const extractNum = (s) => { const m = (s||'').match(/(\d+)\s*$/); return m ? parseInt(m[1], 10) : null; };
   if (state.quoteFilterFromNum && state.quoteFilterFromNum.trim()) { const from = extractNum(state.quoteFilterFromNum); if (from !== null) list = list.filter(x => { const n = extractNum(x.quote_number); return n !== null && n >= from; }); }
@@ -1537,7 +1537,7 @@ function filteredQuotations() {
   return list;
 }
 function newQuoteForm() {
-  return { quote_number:'', customer_id:'', customer_ref:'', quote_date:new Date().toISOString().slice(0,10), valid_until:'', price_mode:'قبل الضريبة', default_tax:String(vatRate()), no_tax:!taxOn(), discount:'0', notes:'', lines:[], status:'مفتوح' };
+  return { quote_number:'', customer_id:'', walkin_customer_name:'', walkin_customer_mobile:'', customer_ref:'', quote_date:new Date().toISOString().slice(0,10), valid_until:'', price_mode:'قبل الضريبة', default_tax:String(vatRate()), no_tax:!taxOn(), discount:'0', notes:'', lines:[], status:'مفتوح' };
 }
 function calcLineTotals(f) {
   const subtotal = f.lines.reduce((s,l) => s + lineAmt(l), 0);
@@ -1554,7 +1554,7 @@ async function openQuoteById(id) {
   if (!q) return;
   const { data: lineRows } = await sb.from('quotation_items').select('*, items(name, sku, unit)').eq('quotation_id', id);
   state.quoteForm = {
-    quote_number: q.quote_number, customer_id: q.customer_id, customer_ref: q.customer_ref||'', quote_date: q.quote_date,
+    quote_number: q.quote_number, customer_id: q.customer_id || '', walkin_customer_name: q.walkin_customer_name||'', walkin_customer_mobile: q.walkin_customer_mobile||'', customer_ref: q.customer_ref||'', quote_date: q.quote_date,
     valid_until: q.valid_until||'', price_mode:'قبل الضريبة', default_tax:String(vatRate()), no_tax: !!q.no_tax,
     discount: String(q.discount||0), notes: q.notes||'', status: q.status,
     lines: (lineRows||[]).map(l => ({ item_id:l.item_id, item_name:l.items?.name||'', sku:l.items?.sku||'', unit:l.items?.unit||'', quantity:Number(l.quantity), unit_price:Number(l.unit_price), tax_percent:Number(taxPctOf(l)) })),
@@ -2966,7 +2966,7 @@ function renderQuoteFormModal() {
           docTitle: ['بيانات العرض', 'Quotation Details'],
           docRows: [['رقم العرض','Quotation No', f.quote_number, true], ['تاريخ العرض','Date', f.quote_date, true], ['صالح حتى','Valid Until', f.valid_until, true], ['مرجع العميل','Customer Ref', f.customer_ref]],
           partyTitle: ['بيانات العميل', 'Customer Details'],
-          partyRows: [['اسم العميل','Customer', cust ? cust.name : (f.walkin_customer_name || '')], ['رقم العميل','Customer No', cust?.account_code || cust?.code, true], ['الرقم الضريبي','VAT No', cust?.tax_number, true], ['الجوال','Mobile', cust?.mobile || cust?.phone, true], ['العنوان','Address', partyAddressText(cust)]],
+          partyRows: [['اسم العميل','Customer', cust ? cust.name : (f.walkin_customer_name || '')], ['رقم العميل','Customer No', cust?.account_code || cust?.code, true], ['الرقم الضريبي','VAT No', cust?.tax_number, true], ['الجوال','Mobile', cust ? (cust.mobile || cust.phone) : f.walkin_customer_mobile, true], ['العنوان','Address', partyAddressText(cust)]],
           lines: f.lines.map(l => ({ sku: l.sku, name: l.item_name, unit: l.unit, qty: l.quantity, price: l.unit_price, disc: l.disc_pct, tax: l.tax_percent })),
           showDisc: f.lines.some(l => Number(l.disc_pct) > 0),
           totals: [['الإجمالي قبل الخصم','Subtotal', fmt(tot.subtotal)], Number(tot.discount) ? ['الخصم','Discount', fmt(tot.discount), 'neg'] : null, (f.no_tax || !taxOn()) ? (Number(tot.discount) ? ['الصافي','Net', fmt(tot.net)] : null) : ['الإجمالي الخاضع للضريبة','Taxable Amount', fmt(tot.net)], (f.no_tax || !taxOn()) ? null : ['ضريبة القيمة المضافة','VAT', fmt(tot.taxTotal)], ['إجمالي العرض','Total', fmt(tot.grandTotal), 'grand']],
@@ -2991,7 +2991,7 @@ function renderQuoteFormModal() {
       <div class="no-print sx-win" style="padding:10px 12px 12px;">
         <div style="display:grid;grid-template-columns:90px 150px 105px 1fr 95px 170px;gap:5px 4px;align-items:center;">
           <label class="sx-lbl">الرقم</label>
-          <div class="sx-nav mono">${renderNumberNavHtml('quote', f.quote_number, state.editingQuoteId, state.quotations, 'quote_number', v => v.parties?.name)}</div>
+          <div class="sx-nav mono">${renderNumberNavHtml('quote', f.quote_number, state.editingQuoteId, state.quotations, 'quote_number', v => v.parties?.name || v.walkin_customer_name)}</div>
           <label class="sx-lbl">تصنيف العرض</label>
           <div style="display:flex;gap:2px;">
             <select id="qt-tax-class" class="sx-in" ${dis || (!taxOn() ? 'disabled title="الضريبة موقوفة من إعدادات النظام"' : '')}><option value="tax" ${!f.no_tax?'selected':''}>عرض سعر ضريبي</option><option value="none" ${f.no_tax?'selected':''}>عرض سعر بدون ضريبة</option></select>
@@ -3009,9 +3009,14 @@ function renderQuoteFormModal() {
           <label class="sx-lbl">الحالة</label>
           <input class="sx-in sx-ro" style="text-align:center;font-weight:700;color:${locked?'#0F6E56':'#BA7517'};" value="${escapeHtml(f.status||'مسودة')}" disabled />
           <label class="sx-lbl">رقم الجوال</label>
-          <input class="sx-in sx-ro mono" dir="ltr" value="${escapeHtml(cust?.mobile || cust?.phone || '')}" disabled />
+          ${cust ? `<input class="sx-in sx-ro mono" dir="ltr" value="${escapeHtml(cust.mobile || cust.phone || '')}" disabled />`
+                 : `<input id="qt-walkin-mobile" class="sx-in mono" dir="ltr" placeholder="05xxxxxxxx" value="${escapeHtml(f.walkin_customer_mobile||'')}" ${dis} />`}
           <label class="sx-lbl">ر/الضريبي</label>
           <input class="sx-in sx-ro mono" value="${escapeHtml(cust?.tax_number || '')}" disabled />
+          ${cust ? '' : `
+          <label class="sx-lbl">اسم العميل</label>
+          <input id="qt-walkin-name" class="sx-in" style="grid-column:2 / span 3;" placeholder="عميل غير مسجّل — اكتب الاسم هنا، أو اختر عميل مسجّل من الزر فوق" value="${escapeHtml(f.walkin_customer_name||'')}" ${dis} />
+          <div style="grid-column:5 / span 2;font-size:11px;color:#6E6D5F;">ما يحتاج تضيفه بالعملاء</div>`}
         </div>
 
         <div class="sx-tabs">
@@ -6530,7 +6535,7 @@ function renderActiveItemBar() {
     ${admin ? `<div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-receipt"></i><span style="font-size:11px;opacity:0.85;">التكلفة:</span><span class="mono" style="font-weight:700;">${fmt(it.cost)}</span></div>` : ''}
     <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-map-pin"></i><span style="font-size:11px;opacity:0.85;">الموقع:</span><span class="mono" style="font-weight:700;">${escapeHtml([it.location1,it.location2,it.location3,it.location4].filter(Boolean).join(' / ') || '—')}</span></div>
     <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-boxes"></i><span style="font-size:11px;opacity:0.85;">الكمية بالمخزون:</span><span class="mono" style="font-weight:700;color:${outOfStock?'#FFD8D8':'#fff'};">${it.qty}</span></div>
-    <button type="button" data-bar-history="${it.id}" style="${chip}font-size:12px;padding:4px 12px;" title="سجل أسعار البيع بالتواريخ (F3)"><i class="ti ti-history"></i> سجل الأسعار</button>
+    <button type="button" data-bar-history="${it.id}" style="${chip}font-size:12px;padding:4px 12px;" title="سجل أسعار البيع بالتواريخ (F6)"><i class="ti ti-history"></i> سجل الأسعار</button>
     <button id="active-item-bar-close" class="no-print" style="margin-right:auto;background:rgba(255,255,255,0.2);border:none;color:#fff;width:22px;height:22px;border-radius:50%;cursor:pointer;">✕</button>
     ${secondRow}
   </div>`;
@@ -6708,7 +6713,7 @@ function installPriceHistoryDelegation() {
   });
   document.addEventListener('keydown', (ev) => {
     if (ev.key === 'Escape' && state.ph) { state.ph = null; render(); return; }
-    if (ev.key === 'F3' && state.activeSection === 'المبيعات' && !state.ph) {
+    if (ev.key === 'F6' && state.activeSection === 'المبيعات' && !state.ph) {
       const id = document.getElementById('si-item-select')?.value || state.activeBarItemId;
       if (id) { ev.preventDefault(); openPriceHistory(id, 'sales'); }
     }
@@ -8226,6 +8231,7 @@ function renderHelpSection() {
     { keys:'F2', desc:'فتح فاتورة بيع جديدة مباشرة' },
     { keys:'F3', desc:'فتح فاتورة شراء جديدة مباشرة' },
     { keys:'F4', desc:'فتح سند قبض جديد مباشرة' },
+    { keys:'F6', desc:'سجل أسعار بيع الصنف (داخل فاتورة البيع)' },
     { keys:'Esc', desc:'إغلاق أي نافذة أو شاشة مفتوحة حالياً' },
   ];
   return `
@@ -14831,6 +14837,8 @@ function bindAppEvents() {
       if (prev) openQuoteById(prev.id);
     };
     if (document.getElementById('qt-customer')) document.getElementById('qt-customer').onchange = (ev) => { state.quoteForm.customer_id = ev.target.value; };
+    if (document.getElementById('qt-walkin-name')) document.getElementById('qt-walkin-name').oninput = (ev) => { state.quoteForm.walkin_customer_name = ev.target.value; };
+    if (document.getElementById('qt-walkin-mobile')) document.getElementById('qt-walkin-mobile').oninput = (ev) => { state.quoteForm.walkin_customer_mobile = ev.target.value; };
     if (document.getElementById('qt-date')) document.getElementById('qt-date').onchange = (ev) => { state.quoteForm.quote_date = ev.target.value; };
     if (document.getElementById('qt-valid-until')) document.getElementById('qt-valid-until').onchange = (ev) => { state.quoteForm.valid_until = ev.target.value; };
     if (document.getElementById('qt-no-tax')) document.getElementById('qt-no-tax').onchange = (ev) => {
@@ -14877,14 +14885,14 @@ function bindAppEvents() {
     if (document.getElementById('quote-save')) {
       document.getElementById('quote-save').onclick = async () => {
         const f = state.quoteForm;
-        if (!f.customer_id) { alert('اختر العميل'); return; }
+        if (!f.customer_id && !String(f.walkin_customer_name||'').trim()) { alert('اختر عميل مسجّل، أو اكتب اسم العميل'); document.getElementById('qt-walkin-name')?.focus(); return; }
         if (f.lines.length === 0) { alert('أضف صنف واحد على الأقل'); return; }
         const t = calcLineTotals(f);
-        const headerPayload = { customer_id:f.customer_id, customer_ref:f.customer_ref||null, quote_date:f.quote_date, valid_until:f.valid_until||null, discount:t.discount, notes:f.notes||null, subtotal:t.subtotal, tax_total:t.taxTotal, total:t.grandTotal, no_tax:!!f.no_tax };
+        const headerPayload = { customer_id:f.customer_id||null, walkin_customer_name: f.customer_id ? null : (String(f.walkin_customer_name||'').trim()||null), walkin_customer_mobile: f.customer_id ? null : (String(f.walkin_customer_mobile||'').trim()||null), customer_ref:f.customer_ref||null, quote_date:f.quote_date, valid_until:f.valid_until||null, discount:t.discount, notes:f.notes||null, subtotal:t.subtotal, tax_total:t.taxTotal, total:t.grandTotal, no_tax:!!f.no_tax };
         const lineRows = f.lines.map(l => { const sub=lineAmt(l), tax=sub*(Number(taxPctOf(l))/100); return { item_id:l.item_id, quantity:l.quantity, unit_price:l.unit_price, tax_percent:taxPctOf(l), tax_amount:tax, line_total:sub, total_with_tax:sub+tax }; });
         if (state.editingQuoteId) {
           const { error } = await sb.from('quotations').update(headerPayload).eq('id', state.editingQuoteId);
-          if (error) { alert('خطأ بالحفظ:\n'+error.message); return; }
+          if (error) { alert(/walkin_customer|customer_id/.test(error.message) ? 'لازم تشغّل ملف 17_عرض_سعر_بدون_عميل.sql في Supabase أول.\n\n' + error.message : 'خطأ بالحفظ:\n'+error.message); return; }
           await sb.from('quotation_items').delete().eq('quotation_id', state.editingQuoteId);
           const { error: qLinesError } = await sb.from('quotation_items').insert(lineRows.map(l => ({ ...l, quotation_id: state.editingQuoteId })));
           if (qLinesError) { alert('خطأ بحفظ أصناف العرض:\n'+qLinesError.message); return; }
@@ -14892,7 +14900,7 @@ function bindAppEvents() {
           const maxNum = state.quotations.reduce((max,q) => { const m=(q.quote_number||'').match(/(\d+)$/); return m?Math.max(max,parseInt(m[1],10)):max; }, 0);
           const quoteNumber = String(maxNum+1);
           const { data, error } = await sb.from('quotations').insert({ quote_number:quoteNumber, ...headerPayload, created_by: state.session.user.id }).select().single();
-          if (error) { alert('خطأ بالحفظ:\n'+error.message); return; }
+          if (error) { alert(/walkin_customer|customer_id/.test(error.message) ? 'لازم تشغّل ملف 17_عرض_سعر_بدون_عميل.sql في Supabase أول.\n\n' + error.message : 'خطأ بالحفظ:\n'+error.message); return; }
           const { error: qLinesError2 } = await sb.from('quotation_items').insert(lineRows.map(l => ({ ...l, quotation_id: data.id })));
           if (qLinesError2) { alert('خطأ بحفظ أصناف العرض:\n'+qLinesError2.message); return; }
           state.editingQuoteId = data.id;
@@ -14908,7 +14916,8 @@ function bindAppEvents() {
         const f = state.quoteForm;
         await loadSalesInvoices();
         state.salesForm = newSalesForm();
-        state.salesForm.customer_id = f.customer_id;
+        state.salesForm.customer_id = f.customer_id || '';
+        if (!f.customer_id) { state.salesForm.walkin_customer_name = f.walkin_customer_name || ''; state.salesForm.customer_mobile = f.walkin_customer_mobile || ''; state.salesForm.cash_customer_mode = 'walkin'; }
         state.salesForm.customer_ref = f.customer_ref;
         state.salesForm.discount = f.discount;
         state.salesForm.no_tax = f.no_tax;
@@ -14916,6 +14925,7 @@ function bindAppEvents() {
         state.salesForm.lines = f.lines.map(l => ({ item_id:l.item_id, item_name:l.item_name, sku:l.sku, unit:l.unit, quantity:l.quantity, unit_price:l.unit_price, tax_percent:l.tax_percent }));
         state.editingSalesId = null;
         state.showQuoteForm = false;
+        state.activeSection = 'المبيعات'; // نموذج الفاتورة يُعرض داخل قسم المبيعات
         state.showSalesForm = true;
         state.pendingQuoteConvertId = state.editingQuoteId;
         render();
@@ -15080,7 +15090,8 @@ function bindAppEvents() {
         if (error || !quote) { status.textContent = 'ما لقيت عرض بهذا الرقم'; return; }
         if (quote.status === 'محول لفاتورة') { status.textContent = 'هذا العرض محوّل مسبقاً لفاتورة'; return; }
         const { data: lineRows } = await sb.from('quotation_items').select('*, items(name, sku, unit)').eq('quotation_id', quote.id);
-        state.salesForm.customer_id = quote.customer_id;
+        state.salesForm.customer_id = quote.customer_id || '';
+        if (!quote.customer_id) { state.salesForm.walkin_customer_name = quote.walkin_customer_name || ''; state.salesForm.customer_mobile = quote.walkin_customer_mobile || ''; state.salesForm.cash_customer_mode = 'walkin'; }
         state.salesForm.customer_ref = quote.customer_ref || '';
         state.salesForm.discount = String(quote.discount || 0);
         state.salesForm.no_tax = !!quote.no_tax;
@@ -15141,7 +15152,7 @@ function bindAppEvents() {
         const hist = await loadItemSaleHistory(itemId, { limit: 200 });
         if (!document.getElementById('si-item-select') || document.getElementById('si-item-select').value !== itemId) return;
         if (!box) return;
-        const histBtn = `<button type="button" data-bar-history="${itemId}" style="margin-right:6px;padding:3px 10px;border:1px solid #6C3FA8;border-radius:12px;background:#F4EEFB;color:#6C3FA8;font-size:11px;cursor:pointer;"><i class="ti ti-history"></i> السجل الكامل (F3)</button>`;
+        const histBtn = `<button type="button" data-bar-history="${itemId}" style="margin-right:6px;padding:3px 10px;border:1px solid #6C3FA8;border-radius:12px;background:#F4EEFB;color:#6C3FA8;font-size:11px;cursor:pointer;"><i class="ti ti-history"></i> السجل الكامل (F6)</button>`;
         if (hist.length === 0) { box.innerHTML = 'ما فيه مبيعات سابقة لهذا الصنف'; return; }
         const custId = state.salesForm.customer_id;
         const custLast = custId ? hist.find(r => r.customerId === custId) : null;
