@@ -136,6 +136,8 @@
 </script>
 <script>
 const APP_CONFIG = window.APP_CONFIG || {};
+// ملف إعدادات نموذجي لم يُعبَّأ (فيه xxxx) = نعامله كأنه غير موجود
+if (/xxxx/i.test(String(APP_CONFIG.SUPABASE_URL || '')) || /xxxx/i.test(String(APP_CONFIG.SUPABASE_KEY || ''))) { APP_CONFIG.SUPABASE_URL = ''; }
 if (!APP_CONFIG.SUPABASE_URL || !APP_CONFIG.SUPABASE_KEY) {
   document.getElementById('root').innerHTML = `
     <div style="max-width:520px;margin:80px auto;padding:28px;border:2px solid #C0392B;border-radius:10px;background:#FFF5F4;font-family:Tahoma,sans-serif;direction:rtl;text-align:center;">
@@ -634,9 +636,19 @@ function renderLicenseExpiredScreen() {
       <div style="font-size:13.5px;color:#5F5E5A;line-height:1.7;margin-bottom:16px;">${msg}</div>
       ${info?.c ? `<div style="font-size:12px;color:#3A3826;margin-bottom:12px;">العميل: <b>${escapeHtml(info.c)}</b></div>` : ''}
       <textarea id="lic-serial" class="input mono" dir="ltr" rows="3" placeholder="الصق السيريال هنا" style="width:100%;font-size:11.5px;margin-bottom:10px;resize:vertical;"></textarea>
-      <div id="lic-login" style="display:${state.licNeedLogin ? 'grid' : 'none'};grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px;">
-        <input id="lic-user" class="input" placeholder="اسم مستخدم المدير" autocomplete="username" />
-        <input id="lic-pass" type="password" class="input" placeholder="كلمة المرور" autocomplete="current-password" />
+      <div id="lic-owner" style="display:${(reason === 'missing' || state.licNeedOwner) && !state.licNeedLogin ? 'block' : 'none'};text-align:right;margin-bottom:10px;">
+        <div style="font-size:12px;font-weight:700;color:#1B3352;margin-bottom:6px;">حساب صاحب المحل (يُنشأ تلقائياً مع التفعيل)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <input id="lic-ouser" class="input mono" dir="ltr" placeholder="اسم المستخدم (إنجليزي)" autocomplete="off" />
+          <input id="lic-opass" class="input mono" dir="ltr" placeholder="كلمة المرور (6+)" autocomplete="new-password" />
+        </div>
+      </div>
+      <div id="lic-login" style="display:${state.licNeedLogin ? 'block' : 'none'};text-align:right;margin-bottom:10px;">
+        <div style="font-size:12px;font-weight:700;color:#7A5410;margin-bottom:6px;">دخول مدير النظام (هذه النسخة لم يُشغَّل فيها ملف 15)</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          <input id="lic-user" class="input" placeholder="اسم المستخدم" autocomplete="username" />
+          <input id="lic-pass" type="password" class="input" placeholder="كلمة المرور" autocomplete="current-password" />
+        </div>
       </div>
       <div id="lic-msg" style="font-size:12.5px;min-height:18px;margin-bottom:8px;"></div>
       <button id="lic-activate" class="btn primary" style="width:100%;padding:10px;font-size:14px;"><i class="ti ti-key"></i> تفعيل</button>
@@ -651,36 +663,41 @@ function renderLicenseExpiredScreen() {
 async function activateLicenseFromLockScreen() {
   const msgEl = document.getElementById('lic-msg');
   const say = (t, ok) => { msgEl.textContent = t; msgEl.style.color = ok ? '#0F6E56' : '#C0392B'; };
-  const serial = document.getElementById('lic-serial').value.replace(/\s+/g, '');
-  const username = (document.getElementById('lic-user')?.value || '').trim();
-  const password = document.getElementById('lic-pass')?.value || '';
+  const val = (id) => (document.getElementById(id)?.value || '');
+  const serial = val('lic-serial').replace(/\s+/g, '');
   if (!serial) return say('الصق السيريال أولاً');
   const r = await verifyLicenseSerial(serial);
   if (!r.ok) return say(r.reason);
   if (await serverToday() > r.data.e) return say(`هذا السيريال منتهي بتاريخ ${r.data.e}`);
-  const done = () => { say('✓ تم التفعيل بنجاح — جاري فتح النظام...', true); setTimeout(() => location.reload(), 900); };
-  // ① التفعيل بالسيريال فقط (دالة activate_license بقاعدة البيانات)
-  if (!username) {
+  const done = (extra) => { say('✓ تم التفعيل بنجاح' + (extra || '') + ' — جاري فتح النظام...', true); setTimeout(() => location.reload(), 1600); };
+  const ownerUser = val('lic-ouser').trim().toLowerCase(), ownerPass = val('lic-opass');
+  const adminUser = val('lic-user').trim(), adminPass = val('lic-pass');
+  // ① الطريقة الأساسية: السيريال + (أول مرة) حساب صاحب المحل
+  if (!adminUser) {
     say('جاري التفعيل...', true);
-    const { data, error } = await sb.rpc('activate_license', { p_serial: serial });
-    if (!error && data === 'ok') return done();
+    const { data, error } = await sb.rpc('activate_license', { p_serial: serial, p_owner_user: ownerUser || null, p_owner_pass: ownerPass || null });
+    if (!error && data === 'ok') return done(ownerUser ? ` — ادخل بحساب «${ownerUser}»` : '');
+    if (!error && data === 'need_owner') {
+      state.licNeedOwner = true; const box = document.getElementById('lic-owner'); if (box) box.style.display = 'block';
+      document.getElementById('lic-ouser')?.focus();
+      return say('اكتب اسم مستخدم وكلمة مرور لصاحب المحل، ثم اضغط تفعيل');
+    }
     if (!error && data) return say(data);
-    // الدالة غير مثبّتة بهذه النسخة → نطلب دخول المدير (الطريقة القديمة)
+    // الدالة غير مثبّتة بهذه النسخة → دخول مدير النظام (الطريقة القديمة)
     state.licNeedLogin = true;
-    const box = document.getElementById('lic-login'); if (box) box.style.display = 'grid';
-    return say('أدخل اسم مستخدم المدير وكلمة المرور ثم اضغط تفعيل');
+    const lb = document.getElementById('lic-login'); if (lb) lb.style.display = 'block';
+    const ob = document.getElementById('lic-owner'); if (ob) ob.style.display = 'none';
+    return say('أدخل اسم مستخدم مدير النظام وكلمة المرور ثم اضغط تفعيل');
   }
-  // ② بدخول المدير
+  // ② بدخول مدير النظام
   say('جاري التفعيل...', true);
-  const email = username.includes('@') ? username : `${username.toLowerCase()}@retailapp-users.com`;
-  const { error: loginErr } = await sb.auth.signInWithPassword({ email, password });
+  const email = adminUser.includes('@') ? adminUser : `${adminUser.toLowerCase()}@retailapp-users.com`;
+  const { error: loginErr } = await sb.auth.signInWithPassword({ email, password: adminPass });
   if (loginErr) {
     const m = String(loginErr.message || '');
     if (/confirm/i.test(m)) return say('✓ السيريال صحيح — لكن الحساب غير مؤكَّد: في Supabase افتح Authentication ← Users ← المستخدم ← Confirm email');
-    return say(`✓ السيريال صحيح — لكن تسجيل الدخول فشل: اسم المستخدم «${username}» أو كلمة المرور غير صحيحة`);
+    return say(`✓ السيريال صحيح — لكن تسجيل الدخول فشل: اسم المستخدم «${adminUser}» أو كلمة المرور غير صحيحة`);
   }
-  const { data: rpcData, error: rpcErr } = await sb.rpc('activate_license', { p_serial: serial });
-  if (!rpcErr && rpcData === 'ok') return done();
   const { data: upd, error } = await sb.from('license_settings').update({ serial, expiry_date: r.data.e }).eq('id', 1).select();
   if (error || !upd || !upd.length) {
     await sb.auth.signOut();
@@ -4675,6 +4692,22 @@ function bindPurchaseSanmarUI() {
 }
 // ترحيل المردود كعملية واحدة بقاعدة البيانات (نفس دالة post_document لفاتورة البيع)
 // يرجّع true لو تم، false لو فشل (ما تغيّر شيء)، null لو الدالة غير مثبّتة (نكمل بالطريقة القديمة)
+// ترحيل أي مستند كعملية واحدة بقاعدة البيانات (دالة post_document)
+// يرجّع true لو تم، false لو فشل (ما تغيّر شيء)، null لو الدالة غير مثبّتة/قديمة (نكمل بالطريقة القديمة)
+async function postDocAtomic(docTable, docId, { stock = [], parties = [], date, description, sourceType, lines = [] }) {
+  const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+  lines = lines.map(l => ({ ...l, debit: r2(l.debit), credit: r2(l.credit) })).filter(l => l.debit || l.credit);
+  const dd = r2(lines.reduce((a, l) => a + l.debit - l.credit, 0));
+  if (Math.abs(dd) > 0 && Math.abs(dd) < 0.05) { const L = lines.find(l => l.credit > 0); if (L) L.credit = r2(L.credit + dd); }
+  const { error } = await sb.rpc('post_document', { p: { doc_table: docTable, doc_id: docId, stock, parties: parties.filter(x => x.party_id && r2(x.delta)).map(x => ({ ...x, delta: r2(x.delta) })),
+    entry: { date, description, source_type: sourceType, lines } } });
+  if (!error) return true;
+  const m = error.message || '';
+  const missing = error.code === 'PGRST202' || error.code === '42883' || (/post_document/.test(m) && /not find|does not exist|schema cache/i.test(m)) || /نوع مستند غير مسموح/.test(m);
+  if (missing) return null;
+  alert('لم يتم الاعتماد — لم يتغيّر أي شيء:\n\n' + m);
+  return false;
+}
 async function postReturnAtomic(kind, f, t, returnCost) {
   const isS = kind === 'sales';
   const docId = isS ? state.editingSalesReturnId : state.editingPurchaseReturnId;
@@ -10419,7 +10452,7 @@ async function loadCrmLogs(clientId) {
   state.crmLogs = data || [];
 }
 function emptyCrmForm() {
-  return { name:'', phone:'', city:'', netlify_url:'', supabase_url:'', subscription_start:'', subscription_end:'', status:'نشط', notes:'' };
+  return { name:'', phone:'', city:'', netlify_url:'', supabase_url:'', subscription_start:'', subscription_end:'', status:'نشط', notes:'', designer_user:'coinsoft', designer_pass:'', owner_user:'', owner_pass:'' };
 }
 
 
@@ -10435,7 +10468,7 @@ function isMasterCopy() { return currentProjectRef() === MASTER_PROJECT_REF; }
 function serialGenDefaults() {
   if (!state.serialGen) {
     const d = new Date(); d.setFullYear(d.getFullYear() + 1);
-    state.serialGen = { client: '', project: '', expiry: d.toISOString().slice(0, 10), users: '0', trial: false, note: '', serial: '', msg: '', keyName: '' };
+    state.serialGen = { ownerUser: '', ownerPass: '', client: '', project: '', expiry: d.toISOString().slice(0, 10), users: '0', trial: false, note: '', serial: '', msg: '', keyName: '' };
   }
   return state.serialGen;
 }
@@ -10464,6 +10497,9 @@ function renderSerialGenTab() {
         <label style="font-size:12.5px;font-weight:700;">تاريخ الانتهاء</label><input id="sg-expiry" type="date" class="input mono" value="${escapeHtml(g.expiry)}" />
         <label style="font-size:12.5px;font-weight:700;">عدد المستخدمين</label><input id="sg-users" class="input mono" style="max-width:120px;" value="${escapeHtml(g.users)}" title="0 = غير محدود" />
         <label style="font-size:12.5px;font-weight:700;">نسخة تجريبية</label><label style="font-size:12.5px;display:flex;gap:6px;align-items:center;"><input id="sg-trial" type="checkbox" ${g.trial ? 'checked' : ''} /> يظهر للعميل شريط «نسخة تجريبية»</label>
+        <label style="font-size:12.5px;font-weight:700;">حساب صاحب المحل</label>
+        <div><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;"><input id="sg-ouser" class="input mono" dir="ltr" placeholder="اسم المستخدم" value="${escapeHtml(g.ownerUser||'')}" /><input id="sg-opass" class="input mono" dir="ltr" placeholder="كلمة المرور" value="${escapeHtml(g.ownerPass||'')}" /></div>
+          <div style="font-size:10.5px;color:#8B8A7A;margin-top:3px;">اختياري — يُحفظ في «متابعة العملاء» ويُرسل مع السيريال، والعميل يكتبه في شاشة التفعيل فيُنشأ حسابه</div></div>
         <label style="font-size:12.5px;font-weight:700;">ملاحظة (لك)</label><input id="sg-note" class="input" value="${escapeHtml(g.note)}" placeholder="مثلاً: دفع 1500 — تحويل" />
       </div>
       <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
@@ -10498,7 +10534,7 @@ async function signLicense(data) {
 }
 function bindSerialGenTab() {
   const g = serialGenDefaults(); const $ = id => document.getElementById(id);
-  const read = () => { if (!$('sg-client')) return; g.client = $('sg-client').value; g.project = $('sg-project').value; g.expiry = $('sg-expiry').value; g.users = $('sg-users').value; g.trial = $('sg-trial').checked; g.note = $('sg-note').value; };
+  const read = () => { if (!$('sg-client')) return; g.ownerUser = ($('sg-ouser')?.value || '').trim().toLowerCase(); g.ownerPass = $('sg-opass')?.value || ''; g.client = $('sg-client').value; g.project = $('sg-project').value; g.expiry = $('sg-expiry').value; g.users = $('sg-users').value; g.trial = $('sg-trial').checked; g.note = $('sg-note').value; };
   if ($('sg-keyfile')) $('sg-keyfile').onchange = async (ev) => {
     const f = ev.target.files[0]; if (!f) return;
     try { await loadSerialKeyFile(f); g.keyName = f.name; showToast('✓ تم تحميل المفتاح'); }
@@ -10506,7 +10542,7 @@ function bindSerialGenTab() {
     ev.target.value = ''; render();
   };
   if ($('sg-unload')) $('sg-unload').onclick = () => { __serialSignKey = null; g.keyName = ''; render(); };
-  ['sg-client','sg-project','sg-expiry','sg-users','sg-note'].forEach(id => { if ($(id)) $(id).oninput = read; });
+  ['sg-client','sg-project','sg-expiry','sg-users','sg-note','sg-ouser','sg-opass'].forEach(id => { if ($(id)) $(id).oninput = read; });
   if ($('sg-trial')) $('sg-trial').onchange = read;
   if ($('sg-this')) $('sg-this').onclick = () => { read(); g.project = currentProjectRef(); g.client = g.client || state.company?.name_ar || ''; render(); };
   document.querySelectorAll('[data-sg-period]').forEach(b => { b.onclick = () => {
@@ -10525,13 +10561,13 @@ function bindSerialGenTab() {
     g.serial = await signLicense(data); g.lastProject = ref; g.msg = '';
     logActivity('إصدار سيريال', `${data.c} — ${data.e}${g.trial ? ' (تجريبي)' : ''}`);
     // تسجيل تلقائي في «متابعة العملاء» (تحديث العميل لو موجود بنفس الرابط، أو إضافته)
-    try { const added = await recordLicenseInCrm(data, data.n, g.note); g.msg = added ? '✓ أُضيف العميل إلى «متابعة العملاء»' : '✓ تم تحديث اشتراك العميل في «متابعة العملاء»'; }
+    try { const added = await recordLicenseInCrm(data, data.n, g.note, g.ownerUser ? { owner_user: g.ownerUser, owner_pass: g.ownerPass } : null); g.msg = added ? '✓ أُضيف العميل إلى «متابعة العملاء»' : '✓ تم تحديث اشتراك العميل في «متابعة العملاء»'; }
     catch (e) { g.msg = '⚠️ لم يُسجَّل في «متابعة العملاء»: ' + (e.message || e); }
     render();
   };
   if ($('sg-copy')) $('sg-copy').onclick = () => { navigator.clipboard.writeText(g.serial); showToast('✓ تم نسخ السيريال'); };
   if ($('sg-copymsg')) $('sg-copymsg').onclick = () => {
-    const msg = `السلام عليكم،\n${g.trial ? 'هذا سيريال النسخة التجريبية (14 يوم) من' : 'هذا سيريال تفعيل'} برنامج Coin Soft ERP (كوين سوفت) لـ ${g.client}\nصالح حتى: ${g.expiry}\n\n${g.serial}\n\nطريقة التفعيل: الصق السيريال في شاشة التفعيل، واكتب اسم مستخدم المدير وكلمة المرور، ثم اضغط تفعيل.`;
+    const msg = `السلام عليكم،\n${g.trial ? 'هذا سيريال النسخة التجريبية (14 يوم) من' : 'هذا سيريال تفعيل'} برنامج Coin Soft ERP (كوين سوفت) لـ ${g.client}\nصالح حتى: ${g.expiry}\n\n${g.serial}\n\nطريقة التفعيل: افتح رابط البرنامج، والصق السيريال${g.ownerUser ? `، واكتب:\nاسم المستخدم: ${g.ownerUser}\nكلمة المرور: ${g.ownerPass}` : ''}\nثم اضغط «تفعيل».`;
     navigator.clipboard.writeText(msg); showToast('✓ تم نسخ الرسالة');
   };
   if ($('sg-activate')) $('sg-activate').onclick = async () => {
@@ -10542,14 +10578,16 @@ function bindSerialGenTab() {
   };
 }
 
-async function recordLicenseInCrm(info, serialNo, note) {
+async function recordLicenseInCrm(info, serialNo, note, extra) {
   const ref = info.p || currentProjectRef();
   const { data: rows, error: qErr } = await sb.from('crm_clients').select('id').ilike('supabase_url', `%${ref}%`);
   if (qErr) throw qErr;
   const rec = { subscription_start: info.i || new Date().toISOString().slice(0, 10), subscription_end: info.e, status: info.t ? 'تجريبي' : 'نشط',
                 notes: (note ? note + ' — ' : '') + 'سيريال ' + (serialNo || info.n || '') + (info.u ? ` — ${info.u} مستخدم` : '') };
-  const r = (rows && rows.length) ? await sb.from('crm_clients').update(rec).eq('id', rows[0].id)
-                                  : await sb.from('crm_clients').insert({ name: info.c, supabase_url: `https://${ref}.supabase.co`, ...rec });
+  const write = (x) => (rows && rows.length) ? sb.from('crm_clients').update(x).eq('id', rows[0].id)
+                                            : sb.from('crm_clients').insert({ name: info.c, supabase_url: `https://${ref}.supabase.co`, ...x });
+  let r = await write(extra ? { ...rec, ...extra } : rec);
+  if (r.error && extra && /owner_/.test(r.error.message || '')) r = await write(rec);
   if (r.error) throw r.error;
   await loadCrmClients();
   return !(rows && rows.length);
@@ -10640,6 +10678,9 @@ function renderCrmFormBox() {
         ${sec('روابط النسخة')}
         ${row('رابط البرنامج', 'ti-world', `<input id="crm-f-netlify" class="input mono" dir="ltr" value="${escapeHtml(f.netlify_url)}" placeholder="coin  أو  https://....github.io/...?c=coin" />`, 'اكتب <b>رمز المحل</b> فقط (مثل <span class="mono">coin</span>) ويكمل الرابط تلقائياً، أو الصق الرابط كاملاً')}
         ${row('رابط قاعدة البيانات', 'ti-database', `<input id="crm-f-supabase" class="input mono" dir="ltr" value="${escapeHtml(f.supabase_url)}" placeholder="kddckfvzrdfbpcafdmxk  أو  https://xxxx.supabase.co" />`, 'الصق <b>رابط المشروع</b> أو <b>الـ ID فقط</b> (يظهر أسفل شاشة تفعيل العميل) — يُستخدم عند إصدار السيريال')}
+        ${sec('بيانات الدخول (خاصة بك — لا تظهر للعميل)')}
+        ${row('دخول المصمم', 'ti-tool', `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;"><input id="crm-f-duser" class="input mono" dir="ltr" placeholder="اسم المستخدم" value="${escapeHtml(f.designer_user||'')}" /><input id="crm-f-dpass" class="input mono" dir="ltr" placeholder="كلمة المرور" value="${escapeHtml(f.designer_pass||'')}" /></div>`, 'حسابك أنت في نسخة هذا العميل (مدير النظام)')}
+        ${row('دخول صاحب المحل', 'ti-user-check', `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;"><input id="crm-f-ouser" class="input mono" dir="ltr" placeholder="اسم المستخدم" value="${escapeHtml(f.owner_user||'')}" /><input id="crm-f-opass" class="input mono" dir="ltr" placeholder="كلمة المرور" value="${escapeHtml(f.owner_pass||'')}" /></div>`, 'حساب مدير الشركة الذي أعطيته للعميل')}
         ${sec('الاشتراك')}
         ${row('بداية الاشتراك', 'ti-calendar', `<input id="crm-f-sub-start" type="date" class="input mono" dir="rtl" value="${escapeHtml(f.subscription_start)}" />`)}
         ${row('نهاية الاشتراك', 'ti-calendar-due', `<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;"><input id="crm-f-sub-end" type="date" class="input mono" dir="rtl" style="max-width:170px;" value="${escapeHtml(f.subscription_end)}" />
@@ -10677,6 +10718,8 @@ function renderCrmDetailBox() {
         ${row('ti-phone', 'الجوال', c.phone ? `<span class="mono" dir="ltr">${escapeHtml(c.phone)}</span> <a href="https://wa.me/${normalizePhone(c.phone)}" target="_blank" title="واتساب" style="margin-inline-start:6px;"><i class="ti ti-brand-whatsapp" style="color:#25D366;font-size:17px;vertical-align:middle;"></i></a>` : '<span style="color:#B5B3A8;">—</span>')}
         ${row('ti-world', 'رابط البرنامج', link(c.netlify_url))}
         ${row('ti-database', 'قاعدة البيانات', link(c.supabase_url))}
+        ${(c.designer_user || c.designer_pass) ? row('ti-tool', 'دخول المصمم', `<span class="mono" dir="ltr">${escapeHtml(c.designer_user||'')}</span> &nbsp;/&nbsp; <span class="mono crm-secret" dir="ltr" data-secret="${escapeHtml(c.designer_pass||'')}">••••••</span> <button type="button" data-crm-reveal class="btn" style="padding:1px 8px;font-size:11px;">إظهار</button> <button type="button" data-crm-copy="${escapeHtml(c.designer_pass||'')}" class="btn" style="padding:1px 8px;font-size:11px;">نسخ</button>`) : ''}
+        ${(c.owner_user || c.owner_pass) ? row('ti-user-check', 'دخول صاحب المحل', `<span class="mono" dir="ltr">${escapeHtml(c.owner_user||'')}</span> &nbsp;/&nbsp; <span class="mono crm-secret" dir="ltr" data-secret="${escapeHtml(c.owner_pass||'')}">••••••</span> <button type="button" data-crm-reveal class="btn" style="padding:1px 8px;font-size:11px;">إظهار</button> <button type="button" data-crm-copy="${escapeHtml(c.owner_pass||'')}" class="btn" style="padding:1px 8px;font-size:11px;">نسخ</button>`) : ''}
         ${row('ti-calendar', 'بداية الاشتراك', `<span class="mono" dir="ltr">${escapeHtml(c.subscription_start || '—')}</span>`)}
         ${row('ti-calendar-due', 'نهاية الاشتراك', `<span class="mono" dir="ltr">${escapeHtml(c.subscription_end || '—')}</span> &nbsp; ${dayTxt}`)}
         ${c.notes ? row('ti-notes', 'ملاحظات', escapeHtml(c.notes)) : ''}
@@ -10691,6 +10734,7 @@ function renderCrmDetailBox() {
       </div>
       <div style="display:flex;gap:6px;padding:10px 16px;border-top:1px solid #E4E2DA;background:#F7F5EF;border-radius:0 0 12px 12px;">
         <button id="crm-detail-edit-btn" class="btn primary" style="padding:6px 14px;font-size:12px;"><i class="ti ti-edit"></i> تعديل</button>
+        ${(c.owner_user && c.phone) ? `<button id="crm-detail-sendlogin-btn" class="btn" style="padding:6px 14px;font-size:12px;"><i class="ti ti-brand-whatsapp" style="color:#25D366;"></i> إرسال بيانات الدخول للعميل</button>` : ''}
         ${c.supabase_url ? `<button id="crm-detail-serial-btn" class="btn" style="padding:6px 14px;font-size:12px;"><i class="ti ti-key" style="color:#BA7517;"></i> إصدار / تجديد سيريال</button>` : ''}
         <button id="crm-detail-close-btn" class="btn" style="padding:6px 14px;font-size:12px;">إغلاق</button>
       </div>
@@ -14256,6 +14300,34 @@ function bindAppEvents() {
             if (!confirm(`المبلغ المدفوع (${fmt(f.paid_amount)}) أكبر من إجمالي الفاتورة (${fmt(t0.grandTotal)}) — تأكد إنك ما كتبت رقم غلط. متابعة؟`)) return;
           }
           if (!confirm('اعتماد الفاتورة يزيد المخزون تلقائياً ويربط رصيد المورد لو آجل، ولا يمكن التراجع عنه من هنا. متابعة؟')) return;
+          // ① الترحيل الآمن (عملية واحدة: المخزون + متوسط التكلفة + رصيد المورد + القيد + الاعتماد)
+          {
+            const t = calcPurchaseTotals(f);
+            const stock = f.lines.map(l => ({ item_id: l.item_id, warehouse_id: f.warehouse_id || null, delta: Number(l.quantity),
+              cost: Math.round(l.unit_cost * t.rate * 10000) / 10000, price: (feat('purchase_edit_price') && Number(l.sale_price) > 0) ? Number(l.sale_price) : null }));
+            const parties = [];
+            if (f.supplier_id && (f.invoice_type === 'آجل' || t.due !== 0)) parties.push({ party_id: f.supplier_id, delta: t.dueSAR });
+            else if (!f.supplier_id && t.due > 0) showToast(`تنبيه: يوجد مبلغ غير مدفوع ${fmt(t.due)} لمورد غير مسجّل — لن يُحفظ كدين قابل للمتابعة`, 'error');
+            const jLines = [
+              { account_code: acc('inventory'), debit: t.subtotalSAR - t.discount * t.rate, credit: 0, description: 'مخزون - ' + f.invoice_number },
+              { account_code: acc('input_vat'), debit: t.taxTotalSAR, credit: 0, description: 'ضريبة مدخلات' },
+            ];
+            const payLines = (Array.isArray(f.payments) && f.payments.length ? f.payments : (Number(f.paid_amount) > 0 ? [{ method: f.payment_method, amount: Number(f.paid_amount) }] : []))
+              .filter(p => Number(p.amount) > 0)
+              .map(p => ({ account_code: cashOrBankAccount(p.method), debit: 0, credit: Number(p.amount) * t.rate, description: 'مدفوع - ' + (p.method || 'نقدي') + (p.ref ? ' #' + p.ref : '') }));
+            const paidSAR = payLines.reduce((s2, l) => s2 + l.credit, 0);
+            payLines.forEach(l => jLines.push(l));
+            if (f.invoice_type === 'آجل') jLines.push({ account_code: getPartyAccountCode(f.supplier_id, 'supplier'), debit: 0, credit: t.grandTotalSAR - paidSAR, description: 'مستحق للمورد' });
+            else if (t.due > 0) jLines.push({ account_code: getPartyAccountCode(f.supplier_id, 'supplier'), debit: 0, credit: t.dueSAR, description: 'باقي غير مدفوع' });
+            const ok = await postDocAtomic('purchase_invoices', state.editingPurchaseId, { stock, parties, date: f.invoice_date, description: `فاتورة شراء ${f.invoice_number}`, sourceType: 'purchase_invoice', lines: jLines });
+            if (ok === false) return;
+            if (ok === true) {
+              state.purchaseForm.approved = true;
+              logActivity('اعتماد فاتورة شراء', f.invoice_number);
+              await loadParties(); await loadDocJournalNumbers('purchase_invoice', state.editingPurchaseId); await loadItems(); await loadPurchases();
+              showToast('تم اعتماد الفاتورة بنجاح'); render(); return;
+            }
+          }
           const t = calcPurchaseTotals(f);
           const saveWarnings = [];
           const trackedCall = async (promise, label) => { const { error } = await promise; if (error) saveWarnings.push(`${label}: ${error.message}`); };
@@ -16263,6 +16335,16 @@ function bindAppEvents() {
         const f = state.receiptVoucherForm;
         if (!(await checkFiscalPeriodAllowed(f.voucher_date))) return;
         if (!confirm('اعتماد سند القبض ينقص من رصيد العميل المستحق فوراً. متابعة؟')) return;
+        {
+          const ok = await postDocAtomic('receipt_vouchers', state.editingReceiptVoucherId, { parties: [{ party_id: f.customer_id, delta: -Number(f.amount) }],
+            date: f.voucher_date, description: `سند قبض ${f.voucher_number}`, sourceType: 'receipt_voucher', lines: [{ account_code: cashOrBankAccount(f.payment_method), debit: Number(f.amount), credit: 0, description: 'تحصيل من العميل' }, { account_code: getPartyAccountCode(f.customer_id, 'customer'), debit: 0, credit: Number(f.amount), description: 'خصم من مستحق العميل' }] });
+          if (ok === false) return;
+          if (ok === true) {
+            state.receiptVoucherForm.approved = true; logActivity('اعتماد سند قبض', f.voucher_number);
+            await loadDocJournalNumbers('receipt_voucher', state.editingReceiptVoucherId); await loadParties(); await loadReceiptVouchers();
+            showToast('تم اعتماد السند بنجاح'); render(); return;
+          }
+        }
         const customer = state.parties.find(p => p.id === f.customer_id);
         let rvBalErr = null;
         if (customer) { const r = await sb.from('parties').update({ balance: Number(customer.balance||0) - Number(f.amount) }).eq('id', customer.id); rvBalErr = r.error; }
@@ -16378,6 +16460,16 @@ function bindAppEvents() {
         const f = state.paymentVoucherForm;
         if (!(await checkFiscalPeriodAllowed(f.voucher_date))) return;
         if (!confirm('اعتماد سند الصرف ينقص من المستحق للمورد فوراً. متابعة؟')) return;
+        {
+          const ok = await postDocAtomic('payment_vouchers', state.editingPaymentVoucherId, { parties: [{ party_id: f.supplier_id, delta: -Number(f.amount) }],
+            date: f.voucher_date, description: `سند صرف ${f.voucher_number}`, sourceType: 'payment_voucher', lines: [{ account_code: getPartyAccountCode(f.supplier_id, 'supplier'), debit: Number(f.amount), credit: 0, description: 'خصم من مستحق المورد' }, { account_code: cashOrBankAccount(f.payment_method), debit: 0, credit: Number(f.amount), description: 'دفع للمورد' }] });
+          if (ok === false) return;
+          if (ok === true) {
+            state.paymentVoucherForm.approved = true; logActivity('اعتماد سند صرف', f.voucher_number);
+            await loadDocJournalNumbers('payment_voucher', state.editingPaymentVoucherId); await loadParties(); await loadPaymentVouchers();
+            showToast('تم اعتماد السند بنجاح'); render(); return;
+          }
+        }
         const supplier = state.parties.find(p => p.id === f.supplier_id);
         let pvBalErr = null;
         if (supplier) { const r = await sb.from('parties').update({ balance: Number(supplier.balance||0) - Number(f.amount) }).eq('id', supplier.id); pvBalErr = r.error; }
@@ -16691,6 +16783,13 @@ function bindAppEvents() {
     } else {
 
     if (state.designerActiveTab === 'توليد سيريال') bindSerialGenTab();
+    document.querySelectorAll('[data-crm-reveal]').forEach(b => { b.onclick = () => { const sp = b.previousElementSibling; const shown = sp.textContent !== '••••••'; sp.textContent = shown ? '••••••' : (sp.dataset.secret || '—'); b.textContent = shown ? 'إظهار' : 'إخفاء'; }; });
+    document.querySelectorAll('[data-crm-copy]').forEach(b => { b.onclick = () => { navigator.clipboard.writeText(b.dataset.crmCopy || ''); showToast('✓ تم النسخ'); }; });
+    if (document.getElementById('crm-detail-sendlogin-btn')) document.getElementById('crm-detail-sendlogin-btn').onclick = () => {
+      const c = state.crmClients.find(x => x.id === state.crmDetailId); if (!c) return;
+      const msg = `السلام عليكم،\nبيانات الدخول لبرنامج Coin Soft ERP (كوين سوفت) — ${c.name}\n\nالرابط: ${c.netlify_url || ''}\nاسم المستخدم: ${c.owner_user}\nكلمة المرور: ${c.owner_pass || ''}\n\nننصح بتغيير كلمة المرور بعد أول دخول.`;
+      window.open(`https://wa.me/${normalizePhone(c.phone)}?text=${encodeURIComponent(msg)}`, '_blank');
+    };
     if (document.getElementById('crm-detail-serial-btn')) document.getElementById('crm-detail-serial-btn').onclick = () => {
       const c = state.crmClients.find(x => x.id === state.crmDetailId); if (!c) return;
       const g = serialGenDefaults();
@@ -16701,7 +16800,7 @@ function bindAppEvents() {
     };
     if (document.getElementById('crm-detail-edit-btn')) document.getElementById('crm-detail-edit-btn').onclick = () => {
       const c = state.crmClients.find(x => x.id === state.crmDetailId); if (!c) return;
-      state.crmForm = { name: c.name || '', phone: c.phone || '', city: c.city || '', netlify_url: c.netlify_url || '', supabase_url: c.supabase_url || '', subscription_start: c.subscription_start || '', subscription_end: c.subscription_end || '', status: c.status || 'نشط', notes: c.notes || '' };
+      state.crmForm = { name: c.name || '', phone: c.phone || '', city: c.city || '', netlify_url: c.netlify_url || '', supabase_url: c.supabase_url || '', subscription_start: c.subscription_start || '', subscription_end: c.subscription_end || '', status: c.status || 'نشط', notes: c.notes || '', designer_user: c.designer_user || '', designer_pass: c.designer_pass || '', owner_user: c.owner_user || '', owner_pass: c.owner_pass || '' };
       state.crmEditingId = c.id; state.crmShowDetail = false; state.crmShowForm = true; render();
     };
     if (document.getElementById('crm-add-current-lic')) document.getElementById('crm-add-current-lic').onclick = async () => {
@@ -16733,7 +16832,7 @@ function bindAppEvents() {
     document.querySelectorAll('[data-crm-edit]').forEach(btn => {
       btn.onclick = () => {
         const c = state.crmClients.find(x => x.id === btn.dataset.crmEdit);
-        state.crmForm = { name:c.name, phone:c.phone||'', city:c.city||'', netlify_url:c.netlify_url||'', supabase_url:c.supabase_url||'', subscription_start:c.subscription_start||'', subscription_end:c.subscription_end||'', status:c.status||'نشط', notes:c.notes||'' };
+        state.crmForm = { name:c.name, phone:c.phone||'', city:c.city||'', netlify_url:c.netlify_url||'', supabase_url:c.supabase_url||'', subscription_start:c.subscription_start||'', subscription_end:c.subscription_end||'', status:c.status||'نشط', notes:c.notes||'', designer_user:c.designer_user||'', designer_pass:c.designer_pass||'', owner_user:c.owner_user||'', owner_pass:c.owner_pass||'' };
         state.crmEditingId = c.id;
         state.crmShowForm = true;
         render();
@@ -16759,8 +16858,14 @@ function bindAppEvents() {
           status: document.getElementById('crm-f-status').value,
           notes: document.getElementById('crm-f-notes').value.trim(),
         };
+        if (state.crmLoginCols !== false) Object.assign(f, {
+          designer_user: document.getElementById('crm-f-duser').value.trim(), designer_pass: document.getElementById('crm-f-dpass').value,
+          owner_user: document.getElementById('crm-f-ouser').value.trim(), owner_pass: document.getElementById('crm-f-opass').value });
         if (!f.name) { alert('اكتب اسم العميل'); return; }
-        { const r = state.crmEditingId ? await sb.from('crm_clients').update(f).eq('id', state.crmEditingId) : await sb.from('crm_clients').insert(f); if (r.error) { showToast('فشل حفظ بيانات العميل', 'error'); return; } }
+        { const save = () => state.crmEditingId ? sb.from('crm_clients').update(f).eq('id', state.crmEditingId) : sb.from('crm_clients').insert(f);
+          let r = await save();
+          if (r.error && /designer_|owner_/.test(r.error.message || '')) { state.crmLoginCols = false; ['designer_user','designer_pass','owner_user','owner_pass'].forEach(k => delete f[k]); r = await save(); if (!r.error) showToast('⚠️ حُفظ العميل بدون بيانات الدخول — شغّل ملف 16 في قاعدة بياناتك لتفعيلها', 'error'); }
+          if (r.error) { showToast('فشل حفظ بيانات العميل: ' + r.error.message, 'error'); return; } }
         await loadCrmClients();
         state.crmShowForm = false;
         render();
