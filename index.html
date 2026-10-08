@@ -3645,7 +3645,7 @@ function renderOwnerDash() {
         ${D.topDebtors.length ? D.topDebtors.map(p => `<div class="od-row" style="align-items:center;"><span>${escapeHtml(p.name)}</span><span style="display:flex;align-items:center;gap:10px;"><b class="mono" style="color:#C0392B;">${fmt(p.balance)}</b><button data-od-wa="${p.id}" title="تذكير على واتساب" style="border:none;background:#25D366;color:#fff;border-radius:8px;width:32px;height:30px;cursor:pointer;font-size:17px;"><i class="ti ti-brand-whatsapp"></i></button></span></div>`).join('') : '<div class="od-empty">لا توجد ديون 👍</div>'}
       </div>
       ${D.lowStock ? `<div class="od-box" style="border-color:#BA7517;background:#FDF6E8;"><div class="od-row"><span><i class="ti ti-alert-triangle" style="color:#BA7517;"></i> أصناف وصلت حد الطلب</span><b class="mono">${D.lowStock}</b></div></div>` : ''}
-      <div style="text-align:center;font-size:11px;color:#888;margin:6px 0 2px;">آخر تحديث: ${D.at.toLocaleTimeString('ar-SA', { hour: '2-digit', minute: '2-digit' })}</div>`;
+      <div style="text-align:center;font-size:11px;color:#888;margin:6px 0 2px;">آخر تحديث: ${D.at.toLocaleTimeString('ar-SA-u-nu-latn', { hour: '2-digit', minute: '2-digit' })}</div>`;
   }
   return `
   <div id="od-overlay" style="position:fixed;inset:0;background:#EEF1F5;z-index:500;overflow-y:auto;">
@@ -4221,98 +4221,195 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
+// =====================================================================
+// الشاشة الرئيسية — تحليلات حية (الأرقام المالية للمدير/من له صلاحية التقارير فقط)
+// =====================================================================
+function homeCanSeeMoney() { return isAdmin() || canViewReports(); }
+function homeRanges(period) {
+  const d = x => x.toISOString().slice(0, 10);
+  const today = new Date(); today.setHours(12, 0, 0, 0);
+  const add = (x, n) => { const y = new Date(x); y.setDate(y.getDate() + n); return y; };
+  let from, prevFrom, prevTo, label, prevLabel;
+  if (period === 'today') { from = today; prevFrom = prevTo = add(today, -1); label = 'اليوم'; prevLabel = 'أمس'; }
+  else if (period === 'week') { from = add(today, -6); prevFrom = add(today, -13); prevTo = add(today, -7); label = 'آخر 7 أيام'; prevLabel = 'الأسبوع الماضي'; }
+  else if (period === 'year') { from = new Date(today.getFullYear(), 0, 1, 12); prevFrom = new Date(today.getFullYear() - 1, 0, 1, 12); prevTo = new Date(today.getFullYear() - 1, today.getMonth(), today.getDate(), 12); label = 'هذه السنة'; prevLabel = 'نفس الفترة من السنة الماضية'; }
+  else { from = new Date(today.getFullYear(), today.getMonth(), 1, 12); prevFrom = new Date(today.getFullYear(), today.getMonth() - 1, 1, 12); prevTo = add(prevFrom, today.getDate() - 1); label = 'هذا الشهر'; prevLabel = 'الشهر الماضي'; }
+  const sixFrom = new Date(today.getFullYear(), today.getMonth() - 5, 1, 12);
+  return { today: d(today), yesterday: d(add(today, -1)), from: d(from), to: d(today), prevFrom: d(prevFrom), prevTo: d(prevTo), d30: d(add(today, -29)), sixFrom: d(sixFrom), in7: d(add(today, 7)), label, prevLabel };
+}
+async function loadHomeDash() {
+  if (state.homeDashLoading || !state.session) return;
+  const period = state.homePeriod || 'month';
+  state.homeDashLoading = true;
+  const R = homeRanges(period);
+  const money = homeCanSeeMoney();
+  try {
+    const minFrom = [R.from, R.prevFrom, R.d30, R.sixFrom, R.yesterday].sort()[0];
+    const sum = (arr, k = 'total') => arr.reduce((s, x) => s + Number(x[k] || 0), 0);
+    const inR = (dt, a, b2) => dt >= a && dt <= b2;
+    const D = { period, R, money, at: Date.now() };
+    if (money) {
+      const [salesRes, purRes] = await Promise.all([
+        fetchAllQ(() => sb.from('sales_invoices').select('id, total, invoice_date, customer_id, walkin_customer_name').eq('approved', true).gte('invoice_date', minFrom).lte('invoice_date', R.to).order('id')),
+        fetchAllQ(() => sb.from('purchase_invoices').select('total, invoice_date').eq('approved', true).gte('invoice_date', R.sixFrom).lte('invoice_date', R.to).order('id')),
+      ]);
+      const sales = salesRes.data || [], purs = purRes.data || [];
+      const cur = sales.filter(x => inR(x.invoice_date, R.from, R.to));
+      const todayS = sales.filter(x => x.invoice_date === R.today), yestS = sales.filter(x => x.invoice_date === R.yesterday);
+      Object.assign(D, {
+        todayTotal: sum(todayS), todayCount: todayS.length, yestTotal: sum(yestS),
+        curTotal: sum(cur), curCount: cur.length, prevTotal: sum(sales.filter(x => inR(x.invoice_date, R.prevFrom, R.prevTo))),
+      });
+      // آخر 30 يوم
+      D.days = [];
+      for (let i = 29; i >= 0; i--) { const x = new Date(); x.setHours(12); x.setDate(x.getDate() - i); const k = x.toISOString().slice(0, 10); D.days.push({ k, v: sum(sales.filter(s2 => s2.invoice_date === k)) }); }
+      // آخر 6 شهور
+      D.months = [];
+      for (let i = 5; i >= 0; i--) { const x = new Date(); x.setDate(1); x.setMonth(x.getMonth() - i); const k = x.toISOString().slice(0, 7);
+        D.months.push({ k, label: x.toLocaleDateString('ar-SA-u-ca-gregory', { month: 'long' }), s: sum(sales.filter(s2 => (s2.invoice_date || '').startsWith(k))), p: sum(purs.filter(p2 => (p2.invoice_date || '').startsWith(k))) }); }
+      // الربح من القيود
+      const salesAccs = [...new Set([acc('sales_cash'), acc('sales_credit')])], retAcc = acc('sales_returns'), cogsAcc = acc('cogs');
+      const pl = await fetchAllQ(() => sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date)').in('account_code', [...salesAccs, retAcc, cogsAcc]).gte('journal_entries.entry_date', R.from).lte('journal_entries.entry_date', R.to).order('id'));
+      let revenue = 0, rets = 0, cogs = 0;
+      (pl.data || []).forEach(l => { const dr = Number(l.debit || 0), cr = Number(l.credit || 0);
+        if (salesAccs.includes(l.account_code)) revenue += cr - dr; else if (l.account_code === retAcc) rets += dr - cr; else if (l.account_code === cogsAcc) cogs += dr - cr; });
+      D.profit = revenue - rets - cogs; D.netRevenue = revenue - rets;
+      // أكثر الأصناف مبيعاً
+      const ids = cur.map(x => x.id), itemAgg = {};
+      for (let i = 0; i < ids.length; i += 150) {
+        const r = await fetchAllQ(() => sb.from('sales_invoice_items').select('item_id, quantity, line_total').in('invoice_id', ids.slice(i, i + 150)).order('id'));
+        (r.data || []).forEach(l => { const g = itemAgg[l.item_id] || (itemAgg[l.item_id] = { qty: 0, amount: 0 }); g.qty += Number(l.quantity || 0); g.amount += Number(l.line_total || 0); });
+      }
+      D.topItems = Object.entries(itemAgg).map(([id, v]) => ({ id, ...v, name: state.items.find(it => it.id === id)?.name || '—' })).sort((x, y) => y.amount - x.amount).slice(0, 5);
+      // أفضل العملاء
+      const custAgg = {};
+      cur.forEach(x => { const key = x.customer_id || ('w:' + (x.walkin_customer_name || 'عميل نقدي'));
+        const g = custAgg[key] || (custAgg[key] = { amount: 0, name: x.customer_id ? (state.parties.find(p2 => p2.id === x.customer_id)?.name || '—') : (x.walkin_customer_name || 'عميل نقدي') }); g.amount += Number(x.total || 0); });
+      D.topCustomers = Object.values(custAgg).sort((x, y) => y.amount - x.amount).slice(0, 5);
+      const debtors = state.parties.filter(p2 => p2.party_type === 'customer' && Number(p2.balance) > 0.005);
+      D.custDebt = debtors.reduce((s2, p2) => s2 + Number(p2.balance), 0); D.debtorsCount = debtors.length;
+    } else {
+      const { data: mine } = await sb.from('sales_invoices').select('id, total').eq('invoice_date', R.today).eq('created_by', state.session.user.id);
+      D.myTodayCount = (mine || []).length;
+    }
+    // تنبيهات للجميع
+    const act = state.items.filter(it => it.active !== false);
+    D.outOfStock = act.filter(it => Number(it.qty || 0) <= 0 && Number(it.reorder_at || 0) > 0);
+    D.reorder = act.filter(it => Number(it.qty || 0) > 0 && Number(it.reorder_at || 0) > 0 && Number(it.qty || 0) <= Number(it.reorder_at || 0));
+    const { data: qExp } = await sb.from('quotations').select('id').gte('valid_until', R.today).lte('valid_until', R.in7).neq('status', 'محول لفاتورة');
+    D.quotesExpiring = (qExp || []).length;
+    state.homeDash = D;
+  } catch (e) { console.error('home dash', e); }
+  state.homeDashLoading = false;
+  if (state.activeSection === 'الرئيسية') render();
+}
+function homeLineChart(days) {
+  const W = 640, H = 200, L = 44, Rr = 630, T = 18, B = 170;
+  const max = Math.max(1, ...days.map(d => d.v));
+  const nice = (() => { const p = Math.pow(10, Math.floor(Math.log10(max))); return Math.ceil(max / p) * p; })();
+  const x = i => L + (Rr - L) * i / (days.length - 1), y = v => B - (B - T) * v / nice;
+  const pts = days.map((d, i) => `${x(i).toFixed(1)},${y(d.v).toFixed(1)}`);
+  const short = v => v >= 1000 ? (v / 1000).toFixed(v >= 10000 ? 0 : 1).replace(/\.0$/, '') + 'k' : String(Math.round(v));
+  const last = days[days.length - 1];
+  return `<svg viewBox="0 0 ${W} ${H + 18}" width="100%" height="210" style="display:block;">
+    <defs><linearGradient id="hg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3D6389" stop-opacity=".32"/><stop offset="1" stop-color="#3D6389" stop-opacity="0"/></linearGradient></defs>
+    ${[0, 1, 2, 3].map(i => { const v = nice * i / 3, yy = y(v); return `<line x1="${L}" y1="${yy}" x2="${Rr}" y2="${yy}" stroke="#EEF0F4"/><text x="4" y="${yy + 4}" font-size="10" fill="#8B8A7A" font-family="IBM Plex Mono">${short(v)}</text>`; }).join('')}
+    ${[0, 10, 20, 29].map(i => `<text x="${x(i)}" y="${H + 8}" font-size="10" fill="#8B8A7A" text-anchor="middle" font-family="IBM Plex Mono">${days[i].k.slice(5)}</text>`).join('')}
+    <path d="M${pts.join(' L')} L${x(days.length - 1)},${B} L${L},${B}Z" fill="url(#hg)"/>
+    <path d="M${pts.join(' L')}" fill="none" stroke="#2C4A6E" stroke-width="2.5" stroke-linejoin="round"/>
+    ${days.map((d, i) => `<circle cx="${x(i)}" cy="${y(d.v)}" r="9" fill="transparent"><title>${d.k}: ${fmt(d.v)}</title></circle>`).join('')}
+    <circle cx="${x(days.length - 1)}" cy="${y(last.v)}" r="5" fill="#2C4A6E" stroke="#fff" stroke-width="2"/>
+    <rect x="${Rr - 100}" y="2" width="100" height="22" rx="6" fill="#1B3352"/><text x="${Rr - 50}" y="17" fill="#fff" font-size="11" text-anchor="middle" font-family="IBM Plex Mono">${fmt(last.v)} · اليوم</text>
+  </svg>`;
+}
+function homeBarChart(months) {
+  const W = 360, H = 190, T = 14, B = 165;
+  const max = Math.max(1, ...months.flatMap(m => [m.s, m.p]));
+  const slot = (W - 20) / months.length, bw = Math.min(18, slot / 2 - 4);
+  return `<svg viewBox="0 0 ${W} ${H + 10}" width="100%" height="210" style="display:block;">
+    ${[0, 1, 2, 3].map(i => `<line x1="10" y1="${B - (B - T) * i / 3}" x2="${W - 10}" y2="${B - (B - T) * i / 3}" stroke="#EEF0F4"/>`).join('')}
+    ${months.map((m, i) => { const cx = 10 + slot * i + slot / 2, hs = (B - T) * m.s / max, hp = (B - T) * m.p / max; return `
+      <rect x="${cx - bw - 1}" y="${B - hs}" width="${bw}" height="${hs}" rx="3" fill="#2C4A6E"><title>مبيعات ${m.label}: ${fmt(m.s)}</title></rect>
+      <rect x="${cx + 1}" y="${B - hp}" width="${bw}" height="${hp}" rx="3" fill="#A9BCD3"><title>مشتريات ${m.label}: ${fmt(m.p)}</title></rect>
+      <text x="${cx}" y="${H + 2}" font-size="10.5" fill="#8B8A7A" text-anchor="middle">${escapeHtml(m.label)}</text>`; }).join('')}
+  </svg>`;
+}
 function renderHomeSection() {
-  const c = state.company || {};
-  const phones = [
-    c.phone ? { icon: 'ti-phone', label: c.address ? c.address.split('-')[0].trim() : 'الهاتف', value: [c.phone, c.phone2].filter(Boolean).join(' - ') } : null,
-    c.mobile ? { icon: 'ti-device-mobile', label: 'الجوال', value: c.mobile } : null,
-    c.website ? { icon: 'ti-world', label: null, value: c.website } : null,
-    c.email ? { icon: 'ti-mail', label: null, value: c.email } : null,
-  ].filter(Boolean);
-
-  const totalSales = (state.salesInvoices||[]).filter(i => i.approved).reduce((s,i) => s + Number(i.total||0), 0);
-  const totalPurchases = (state.purchases||[]).filter(i => i.approved).reduce((s,i) => s + Number(i.total||0), 0);
-  const salesCount = (state.salesInvoices||[]).filter(i => i.approved).length;
-  const purchasesCount = (state.purchases||[]).filter(i => i.approved).length;
-  const netProfit = state.homeCogs !== null ? (totalSales - state.homeCogs) : (totalSales - totalPurchases);
-  const lowStockCount = (state.items||[]).filter(it => Number(it.qty) <= Number(it.reorder_at||0)).length;
-
-  const kpiCard = (icon, label, value, sub, grad, iconColor, isCount) => `
-    <div style="flex:1;min-width:180px;background:#fff;border-radius:14px;padding:18px 20px;box-shadow:0 4px 18px rgba(15,62,150,0.08);display:flex;align-items:center;gap:14px;">
-      <div style="width:52px;height:52px;border-radius:14px;background:${grad};display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-        <i class="ti ${icon}" style="font-size:24px;color:${iconColor};"></i>
-      </div>
-      <div>
-        <div style="font-size:11.5px;color:#5F5E5A;margin-bottom:2px;">${label}</div>
-        <div style="font-size:19px;font-weight:700;color:#1F2421;" class="mono">${isCount ? Math.round(Number(value)||0) : fmt(value)}</div>
-        <div style="font-size:10.5px;color:#A9A48C;">${sub}</div>
-      </div>
+  const D = state.homeDash;
+  const period = state.homePeriod || 'month';
+  const money = homeCanSeeMoney();
+  const card = 'background:#fff;border-radius:14px;padding:16px 18px;box-shadow:0 4px 18px rgba(15,62,150,0.07);';
+  const pct = (a, b2) => b2 > 0.005 ? ((a - b2) / b2) * 100 : null;
+  const delta = (a, b2, lbl) => { const v = pct(a, b2); if (v === null) return `<span style="color:#8B8A7A;">${lbl ? 'ما فيه بيانات لـ' + lbl : ''}</span>`; const up = v >= 0; return `<span style="color:${up ? '#0F6E56' : '#C0392B'};">${up ? '▲' : '▼'} ${Math.abs(v).toFixed(0)}% عن ${lbl}</span>`; };
+  const kpi = (icon, bg, color, label, value, sub) => `
+    <div style="${card}display:flex;gap:12px;align-items:center;min-width:0;">
+      <div style="width:46px;height:46px;border-radius:12px;background:${bg};display:flex;align-items:center;justify-content:center;flex-shrink:0;"><i class="ti ${icon}" style="font-size:23px;color:${color};"></i></div>
+      <div style="min-width:0;"><div style="font-size:11.5px;color:#6E6D5F;">${label}</div><div class="mono" style="font-size:21px;font-weight:700;color:#1F2421;">${value}</div><div style="font-size:11px;margin-top:2px;">${sub}</div></div>
     </div>`;
-
+  const listCard = (icon, title, sub, rows, empty) => {
+    const max = Math.max(1, ...rows.map(r => r.amount));
+    return `<div style="${card}"><div style="font-size:13.5px;font-weight:700;color:#1B3352;"><i class="ti ${icon}"></i> ${title}</div><div style="font-size:11px;color:#8B8A7A;margin-bottom:6px;">${sub}</div>
+      ${rows.length ? rows.map((r, i) => `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;${i < rows.length - 1 ? 'border-bottom:1px solid #F0EEE6;' : ''}font-size:12.5px;">
+        <span style="width:22px;height:22px;border-radius:50%;background:#EEF1F6;color:#1B3352;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;">${i + 1}</span>
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(r.name)}</span>
+        <span style="height:6px;border-radius:3px;background:#E4E8F0;width:80px;flex-shrink:0;"><i style="display:block;height:100%;border-radius:3px;background:#3D6389;width:${(r.amount / max * 100).toFixed(0)}%;"></i></span>
+        <b class="mono" style="min-width:64px;text-align:left;">${fmt(r.amount)}</b></div>`).join('') : `<div style="padding:22px 0;text-align:center;color:#8B8A7A;font-size:12px;">${empty}</div>`}</div>`;
+  };
+  const alerts = [];
+  if (D) {
+    if (D.outOfStock.length) alerts.push({ bg: '#FCEBEB', fg: '#9B2C2C', ic: 'ti-alert-triangle', t: `${D.outOfStock.length} صنف خلص من المخزون`, s: D.outOfStock.slice(0, 3).map(i => i.name).join('، ') + (D.outOfStock.length > 3 ? '...' : ''), go: 'الاصناف' });
+    if (D.reorder.length) alerts.push({ bg: '#FCF1E3', fg: '#8A5A12', ic: 'ti-package', t: `${D.reorder.length} صنف وصل حد الطلب`, s: 'جاهزة لطلبية شراء', go: 'الاصناف' });
+    if (money && D.debtorsCount) alerts.push({ bg: '#FDF6E8', fg: '#8A5A12', ic: 'ti-credit-card', t: `${D.debtorsCount} عميل عليهم مبالغ`, s: `بإجمالي ${fmt(D.custDebt)} ${feat('currency_abbr_ar') || ''}`, go: 'العملاء والموردين' });
+    if (D.quotesExpiring) alerts.push({ bg: '#E6EEF8', fg: '#1B3352', ic: 'ti-file-description', t: `${D.quotesExpiring} عرض سعر ينتهي خلال أسبوع`, s: '', go: '__quotations__' });
+  }
+  const alertsCard = `<div style="${card}"><div style="font-size:13.5px;font-weight:700;color:#1B3352;"><i class="ti ti-bell"></i> تنبيهات تحتاج انتباهك</div><div style="font-size:11px;color:#8B8A7A;margin-bottom:8px;">اضغط على أي تنبيه لفتحه</div>
+    ${!D ? '<div style="padding:20px;text-align:center;color:#8B8A7A;font-size:12px;">جاري التحميل...</div>'
+      : alerts.length ? alerts.map(a => `<button type="button" data-home-shortcut="${a.go}" style="width:100%;text-align:right;display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-radius:9px;margin-bottom:7px;font-size:12px;background:${a.bg};color:${a.fg};border:none;cursor:pointer;font-family:inherit;">
+        <i class="ti ${a.ic}" style="font-size:17px;margin-top:1px;"></i><span><b>${escapeHtml(a.t)}</b>${a.s ? `<br><span style="opacity:.8;">${escapeHtml(a.s)}</span>` : ''}</span></button>`).join('')
+      : '<div style="padding:20px;text-align:center;color:#0F6E56;font-size:12.5px;"><i class="ti ti-circle-check" style="font-size:26px;display:block;margin-bottom:4px;"></i>كل شي تمام — ما فيه تنبيهات</div>'}</div>`;
+  const sc = (icon, label, target) => `<button type="button" data-home-shortcut="${target}" style="background:#fff;border:none;border-radius:12px;padding:12px 6px;text-align:center;font-size:12px;color:#1B3352;box-shadow:0 2px 8px rgba(27,51,82,.06);cursor:pointer;font-family:inherit;"><i class="ti ${icon}" style="font-size:22px;display:block;margin-bottom:4px;color:#2C4A6E;"></i>${label}</button>`;
+  const shortcuts = `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;">
+    ${sc('ti-file-invoice', t('sc_new_sale'), 'المبيعات')}${sc('ti-shopping-cart', t('sc_new_purchase'), 'المشتريات')}${sc('ti-file-description', 'عرض سعر', '__quotations__')}
+    ${sc('ti-cash', t('sc_receipt'), '__receipt_vouchers__')}${sc('ti-cube-plus', t('sc_new_item'), 'الاصناف')}${sc('ti-user-plus', t('sc_new_party'), 'العملاء والموردين')}
+    ${sc('ti-search', t('home_open_doc'), '__quick_open__')}${sc('ti-search-plus', t('home_search_full'), '__global_search__')}
+    ${money ? sc('ti-device-mobile-analytics', 'لوحة صاحب المحل', '__owner_dash__') + sc('ti-chart-bar', t('sc_reports'), 'تقارير عامة') : ''}</div>`;
+  const periods = [['today', 'اليوم'], ['week', 'الأسبوع'], ['month', 'الشهر'], ['year', 'السنة']];
+  const cur = feat('currency_abbr_ar') || '';
+  const R = D?.R || homeRanges(period);
   return `
-      <div style="padding:24px 32px 8px;display:flex;gap:16px;flex-wrap:wrap;">
-        ${kpiCard('ti-trending-up', t('kpi_total_sales'), totalSales, `${salesCount} ${t('kpi_approved_invoices')}`, 'rgba(15,110,86,0.12)', '#0F6E56')}
-        ${kpiCard('ti-shopping-cart', t('kpi_total_purchases'), totalPurchases, `${purchasesCount} ${t('kpi_approved_invoices')}`, 'rgba(30,90,192,0.12)', '#2C4A6E')}
-        ${kpiCard('ti-chart-line', t('kpi_net_profit'), netProfit, netProfit >= 0 ? t('kpi_positive') : t('kpi_needs_review'), netProfit >= 0 ? 'rgba(39,174,96,0.12)' : 'rgba(224,73,73,0.12)', netProfit >= 0 ? '#27AE60' : '#E24B4A')}
-        ${kpiCard('ti-alert-triangle', t('kpi_needs_reorder'), lowStockCount, t('kpi_current_stock'), 'rgba(186,117,23,0.12)', '#BA7517', true)}
-      </div>
-      <div style="display:flex;flex:1;">
-        <div style="flex:1.3;position:relative;overflow:hidden;background:linear-gradient(135deg,#1B3352 0%,#2C4A6E 45%,#3D6389 100%);display:flex;flex-direction:column;">
-          <svg viewBox="0 0 400 700" preserveAspectRatio="xMidYMid slice" style="position:absolute;inset:0;width:100%;height:100%;opacity:0.5;">
-            <circle cx="60" cy="90" r="70" fill="none" stroke="#fff" stroke-width="1" opacity="0.25"/>
-            <circle cx="330" cy="220" r="110" fill="none" stroke="#fff" stroke-width="1" opacity="0.2"/>
-            <circle cx="90" cy="480" r="140" fill="none" stroke="#fff" stroke-width="1" opacity="0.18"/>
-            <circle cx="320" cy="600" r="60" fill="none" stroke="#fff" stroke-width="1" opacity="0.25"/>
-            <line x1="0" y1="150" x2="400" y2="90" stroke="#fff" stroke-width="0.5" opacity="0.15"/>
-            <line x1="0" y1="350" x2="400" y2="420" stroke="#fff" stroke-width="0.5" opacity="0.15"/>
-            <line x1="0" y1="560" x2="400" y2="500" stroke="#fff" stroke-width="0.5" opacity="0.15"/>
-            <rect x="40" y="250" width="18" height="18" fill="#fff" opacity="0.15" transform="rotate(20 49 259)"/>
-            <rect x="300" y="380" width="24" height="24" fill="#fff" opacity="0.15" transform="rotate(-15 312 392)"/>
-            <rect x="150" y="600" width="14" height="14" fill="#fff" opacity="0.2" transform="rotate(10 157 607)"/>
-            <circle cx="200" cy="350" r="3" fill="#fff" opacity="0.3"/>
-            <circle cx="140" cy="200" r="2" fill="#fff" opacity="0.3"/>
-            <circle cx="260" cy="470" r="2.5" fill="#fff" opacity="0.3"/>
-          </svg>
-          <div style="position:relative;z-index:1;padding:36px 32px;flex:1;display:flex;flex-direction:column;">
-            <div style="color:#fff;">
-              <div style="font-size:13px;color:#B8C8DC;margin-bottom:4px;">${homeGreeting()}</div>
-              <div style="font-size:22px;font-weight:700;">${escapeHtml(state.profile?.display_name || state.profile?.username || t('welcome'))}</div>
-              <div style="font-size:12px;color:#B8C8DC;margin-top:4px;">${new Date().toLocaleDateString(state.lang==='en'?'en-US':'ar-SA', { weekday:'long', year:'numeric', month:'long', day:'numeric' })}</div>
-            </div>
-            <div style="margin-top:36px;">
-              <div style="color:#B8C8DC;font-size:12px;font-weight:500;margin-bottom:12px;">${t('quick_shortcuts')}</div>
-              <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                ${(isAdmin() || canViewReports()) ? homeShortcut('ti-device-mobile-analytics', 'لوحة صاحب المحل', '__owner_dash__') : ''}
-          ${homeShortcut('ti-search', t('home_open_doc'), '__quick_open__')}
-                ${homeShortcut('ti-search-plus', t('home_search_full'), '__global_search__')}
-                ${homeShortcut('ti-file-invoice', t('sc_new_sale'), 'المبيعات')}
-                ${homeShortcut('ti-shopping-cart', t('sc_new_purchase'), 'المشتريات')}
-                ${homeShortcut('ti-cube-plus', t('sc_new_item'), 'الاصناف')}
-                ${homeShortcut('ti-user-plus', t('sc_new_party'), 'العملاء والموردين')}
-                ${homeShortcut('ti-cash', t('sc_receipt'), '__receipt_vouchers__')}
-                ${homeShortcut('ti-chart-bar', t('sc_reports'), 'تقارير عامة')}
-              </div>
-            </div>
-          </div>
-        </div>
-        <div style="flex:1;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 24px;text-align:center;">
-          <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;">
-            <svg width="56" height="56" viewBox="0 0 200 200">
-              <rect x="10" y="10" width="180" height="180" rx="38" fill="#0F172A"/>
-              <line x1="100" y1="45" x2="60" y2="150" stroke="#F8FAFC" stroke-width="13" stroke-linecap="round"/>
-              <line x1="100" y1="45" x2="140" y2="150" stroke="#F8FAFC" stroke-width="13" stroke-linecap="round"/>
-              <line x1="72" y1="118" x2="128" y2="118" stroke="#22C55E" stroke-width="11" stroke-linecap="round"/>
-            </svg>
-            <div style="text-align:center;">
-              <div style="font-size:15px;color:#1F2421;font-weight:700;">${t('developed_by')} أحمد سوفت</div>
-              <div style="font-size:12px;color:#A9A48C;margin-top:3px;" dir="ltr">0545335561</div>
-            </div>
-          </div>
-          <div style="margin-top:20px;display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border:1px solid #0F6E56;border-radius:4px;font-size:10.5px;color:#0F6E56;">
-            <i class="ti ti-shield-check" style="font-size:14px;"></i> متوافق مع أنظمة هيئة الزكاة والضريبة والجمارك (ZATCA)
-          </div>
-        </div>
-      </div>`;
+  <div style="background:#EEF1F6;padding:18px 24px 24px;display:grid;gap:16px;align-content:start;min-height:calc(100vh - 120px);box-sizing:border-box;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+      <div><div style="font-size:20px;font-weight:700;color:#1B3352;">${homeGreeting()}، ${escapeHtml(state.profile?.display_name || state.profile?.username || '')} 👋</div>
+        <div style="font-size:12px;color:#6E6D5F;">${new Date().toLocaleDateString(state.lang === 'en' ? 'en-US' : 'ar-SA-u-ca-gregory-nu-latn', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}${D ? ` — آخر تحديث ${new Date(D.at).toLocaleTimeString('ar-SA-u-nu-latn', { hour: '2-digit', minute: '2-digit' })}` : ''}
+          <button type="button" id="home-refresh" title="تحديث" style="border:none;background:none;color:#2C4A6E;cursor:pointer;font-size:14px;vertical-align:-2px;"><i class="ti ti-refresh ${state.homeDashLoading ? 'ti-spin' : ''}"></i></button></div></div>
+      ${money ? `<div style="display:flex;gap:4px;background:#fff;border-radius:10px;padding:4px;box-shadow:0 2px 8px rgba(27,51,82,.06);">
+        ${periods.map(([k, l]) => `<button type="button" data-home-period="${k}" style="border:none;padding:6px 14px;border-radius:7px;font-family:inherit;font-size:12px;cursor:pointer;background:${period === k ? '#1B3352' : 'none'};color:${period === k ? '#fff' : '#5F5E5A'};">${l}</button>`).join('')}</div>` : ''}
+    </div>
+    ${money ? `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+      ${kpi('ti-cash', '#E3F4EE', '#0F6E56', 'مبيعات اليوم', D ? fmt(D.todayTotal) : '…', D ? `${delta(D.todayTotal, D.yestTotal, 'أمس')} <span style="color:#8B8A7A;">· ${D.todayCount} فاتورة</span>` : '')}
+      ${kpi('ti-trending-up', '#E6EEF8', '#2C4A6E', `المبيعات — ${R.label}`, D ? fmt(D.curTotal) : '…', D ? `${delta(D.curTotal, D.prevTotal, R.prevLabel)} <span style="color:#8B8A7A;">· ${D.curCount} فاتورة</span>` : '')}
+      ${kpi('ti-chart-line', '#EDF7E9', (D?.profit ?? 0) >= 0 ? '#27AE60' : '#C0392B', `صافي الربح — ${R.label}`, D ? fmt(D.profit) : '…', D ? (D.netRevenue > 0.005 ? `<span style="color:${D.profit >= 0 ? '#0F6E56' : '#C0392B'};">هامش ${(D.profit / D.netRevenue * 100).toFixed(1)}%</span>` : '<span style="color:#8B8A7A;">من القيود المحاسبية</span>') : '')}
+      ${kpi('ti-hourglass', '#FCF1E3', '#BA7517', 'مستحق على العملاء', D ? fmt(D.custDebt) : '…', D ? `<span style="color:#8B8A7A;">${D.debtorsCount} عميل ${cur ? '· ' + cur : ''}</span>` : '')}
+    </div>
+    <style>.hd-row2{display:grid;grid-template-columns:1.7fr 1fr;gap:14px}@media(max-width:900px){.hd-row2{grid-template-columns:1fr}}</style>
+    <div class="hd-row2">
+      <div style="${card}min-width:0;"><div style="font-size:13.5px;font-weight:700;color:#1B3352;">المبيعات — آخر 30 يوم</div><div style="font-size:11px;color:#8B8A7A;margin-bottom:6px;">إجمالي يومي بعد الضريبة — مرّر على النقطة لتشوف القيمة</div>${D ? homeLineChart(D.days) : '<div style="height:210px;"></div>'}</div>
+      <div style="${card}min-width:0;"><div style="font-size:13.5px;font-weight:700;color:#1B3352;">المبيعات مقابل المشتريات</div><div style="font-size:11px;color:#8B8A7A;margin-bottom:6px;">آخر 6 شهور</div>${D ? homeBarChart(D.months) : '<div style="height:210px;"></div>'}
+        <div style="display:flex;gap:14px;font-size:11px;color:#5F5E5A;margin-top:4px;"><span><i style="display:inline-block;width:10px;height:10px;border-radius:3px;background:#2C4A6E;margin-left:5px;vertical-align:-1px;"></i>المبيعات</span><span><i style="display:inline-block;width:10px;height:10px;border-radius:3px;background:#A9BCD3;margin-left:5px;vertical-align:-1px;"></i>المشتريات</span></div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;">
+      ${listCard('ti-trophy', `الأكثر مبيعاً — ${R.label}`, 'حسب قيمة المبيعات قبل الضريبة', D?.topItems || [], D ? 'ما فيه مبيعات بالفترة' : 'جاري التحميل...')}
+      ${listCard('ti-users', `أفضل العملاء — ${R.label}`, 'حسب قيمة المشتريات', D?.topCustomers || [], D ? 'ما فيه مبيعات بالفترة' : 'جاري التحميل...')}
+      ${alertsCard}
+    </div>` : `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;align-items:start;">
+      ${kpi('ti-receipt', '#E3F4EE', '#0F6E56', 'فواتيري اليوم', D ? String(D.myTodayCount ?? 0) : '…', '<span style="color:#8B8A7A;">الفواتير اللي سجّلتها اليوم</span>')}
+      ${alertsCard}
+    </div>`}
+    ${shortcuts}
+    <div style="text-align:center;font-size:11px;color:#8B8A7A;">${t('developed_by')} أحمد سوفت · <span dir="ltr">0545335561</span> · <i class="ti ti-shield-check" style="color:#0F6E56;"></i> متوافق مع ZATCA</div>
+  </div>`;
 }
 
 const REPORTS_HUB_CATEGORIES = [
@@ -13611,9 +13708,15 @@ function bindAppEvents() {
       render();
     };
   });
+  if (state.activeSection === 'الرئيسية' && state.session && !state.homeDashLoading && (!state.homeDash || state.homeDash.period !== (state.homePeriod || 'month') || Date.now() - state.homeDash.at > 5 * 60 * 1000)) {
+    setTimeout(() => loadHomeDash(), 0);
+  }
+  document.querySelectorAll('[data-home-period]').forEach(el => { el.onclick = () => { state.homePeriod = el.dataset.homePeriod; loadHomeDash(); render(); }; });
+  if (document.getElementById('home-refresh')) document.getElementById('home-refresh').onclick = () => { state.homeDash = null; loadHomeDash(); render(); };
   document.querySelectorAll('[data-home-shortcut]').forEach(el => {
     el.onclick = async () => {
       const target = el.dataset.homeShortcut;
+      if (target === '__quotations__') { await loadParties(); await loadQuotations(); state.activeSection = '__quotations__'; render(); return; }
       if (target === '__owner_dash__') { openOwnerDash(); return; }
       if (target === '__shift__') { openShiftModal(); return; }
       if (target === '__quick_open__') {
@@ -20574,7 +20677,7 @@ async function init() {
   await loadCompany();
   const { data } = await sb.auth.getSession();
   state.session = data.session;
-  if (state.session) { await loadProfile(); await loadItems(); await loadParties(); await loadPurchases(); await loadSalesInvoices(); await loadWarehouses(); await loadPaymentMethods(); state.homeCogs = await calcHomeNetProfit(); await loadAllAltNumbersMap(); }
+  if (state.session) { await loadProfile(); await loadItems(); await loadParties(); await loadPurchases(); await loadSalesInvoices(); await loadWarehouses(); await loadPaymentMethods(); await loadAllAltNumbersMap(); }
   render();
   if (state.session) checkAndRunAutoBackup();
   if (state.session && isAdmin()) checkApiRowLimit(); // فحص النسخة الاحتياطية بالخلفية، بدون ما يأخّر ظهور الشاشة
