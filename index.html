@@ -11328,57 +11328,174 @@ function closeBarcodeScanner() {
   render();
 }
 
+// ---------- استيراد الأصناف من Excel (تعرّف ذكي على الأعمدة + ربط يدوي + تنظيف الأرقام) ----------
+const BI_FIELDS = [
+  { key:'sku', label:'رقم الصنف', req:true, kw:['رقم الصنف','رقم القطعه','رقم القطعة','كود الصنف','الكود','كود','sku','code','part no','part number','item no','رقم'] },
+  { key:'name', label:'اسم الصنف', req:true, kw:['اسم الصنف','الاسم','اسم','الصنف','البيان','الوصف','name','description','item'] },
+  { key:'category', label:'الفئة', kw:['الفئه','الفئة','التصنيف','المجموعه','المجموعة','category','group'] },
+  { key:'unit', label:'الوحدة', kw:['الوحده','الوحدة','unit','uom'] },
+  { key:'cost', label:'التكلفة', kw:['التكلفه','التكلفة','سعر الشراء','الشراء','cost'] },
+  { key:'price', label:'سعر البيع', kw:['سعر البيع','سعر 1','سعر1','البيع','السعر','سعر','price'] },
+  { key:'price2', label:'سعر 2', kw:['سعر 2','سعر2','سعر الجمله','سعر الجملة','الجمله','price2','price 2'] },
+  { key:'price3', label:'سعر 3', kw:['سعر 3','سعر3','price3','price 3'] },
+  { key:'qty', label:'الكمية', kw:['الكميه','الكمية','العدد','الرصيد','qty','quantity','stock'] },
+  { key:'barcode', label:'الباركود', kw:['الباركود','باركود','barcode','ean'] },
+  { key:'alt', label:'الرقم البديل', kw:['الرقم البديل','الارقام البديله','رقم بديل','البدائل','بديل','oem','alt'] },
+  { key:'company', label:'رقم الشركة / الماركة', kw:['رقم الشركه','رقم الشركة','الشركه','الشركة','الماركه','الماركة','brand','company'] },
+  { key:'location1', label:'الموقع', kw:['الموقع','الرف','location','shelf'] },
+];
+// ترتيب التعرّف: الحقول الأدق أولاً حتى ما تخطف "السعر" عمود "سعر 2" مثلاً
+const BI_DETECT_ORDER = ['alt','barcode','price2','price3','company','cost','price','qty','unit','category','location1','sku','name'];
+function biNormHeader(h) {
+  return String(h ?? '').trim().toLowerCase().replace(/[أإآ]/g,'ا').replace(/ة/g,'ه').replace(/ى/g,'ي').replace(/[_\-:.()]/g,' ').replace(/\s+/g,' ').trim();
+}
+function biDetectColumns(headerRow) {
+  const H = headerRow.map(biNormHeader);
+  const used = new Set(); const map = {};
+  BI_DETECT_ORDER.forEach(key => {
+    const f = BI_FIELDS.find(x => x.key === key);
+    let best = -1, bestScore = 0;
+    H.forEach((h, i) => {
+      if (!h || used.has(i)) return;
+      f.kw.forEach((k, ki) => {
+        const kk = biNormHeader(k);
+        const sc = h === kk ? 300 - ki : h.startsWith(kk) ? 200 - ki : h.includes(kk) ? 100 - ki : 0;
+        if (sc > bestScore) { bestScore = sc; best = i; }
+      });
+    });
+    map[key] = best; if (best >= 0) used.add(best);
+  });
+  return map;
+}
+function biFindHeaderRow(raw) {
+  let bestRow = 0, bestCount = 0;
+  raw.slice(0, 15).forEach((r, i) => {
+    const m = biDetectColumns(r);
+    const c = Object.values(m).filter(v => v >= 0).length;
+    if (c > bestCount) { bestCount = c; bestRow = i; }
+  });
+  return { row: bestRow, count: bestCount };
+}
+function biCleanNum(v) {
+  let t = String(v ?? '').trim();
+  if (!t) return '';
+  t = t.replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d))
+       .replace(/٫/g, '.').replace(/[٬,\s]/g, '');
+  const cleaned = t.replace(/[^\d.\-]/g, '');
+  return /\d/.test(cleaned) ? cleaned : String(v).trim(); // نص بدون أرقام → يبان كخطأ بدل ما يصير صفر
+}
+function biCleanText(v) { return String(v ?? '').replace(/\s+/g, ' ').trim(); }
+function biBuildRows() {
+  const bi = state.bulkImport; if (!bi) return [];
+  const map = bi.colMap;
+  const existing = new Map(state.items.map(it => [String(it.sku || '').trim().toLowerCase(), it]));
+  const seen = new Set();
+  return bi.raw.slice(bi.headerRow + 1).filter(r => r.some(c => String(c ?? '').trim())).map((r, idx) => {
+    const g = k => map[k] >= 0 ? r[map[k]] : '';
+    const row = { line: bi.headerRow + idx + 2, sku: biCleanText(g('sku')), name: biCleanText(g('name')), category: biCleanText(g('category')), unit: biCleanText(g('unit')) || 'حبة',
+      cost: biCleanNum(g('cost')), price: biCleanNum(g('price')), price2: biCleanNum(g('price2')), price3: biCleanNum(g('price3')), qty: biCleanNum(g('qty')),
+      barcode: biCleanText(g('barcode')), alt: biCleanText(g('alt')), company: biCleanText(g('company')), location1: biCleanText(g('location1')) };
+    const k = row.sku.toLowerCase();
+    const bad = ['cost','price','price2','price3','qty'].find(f => row[f] !== '' && (isNaN(Number(row[f])) || Number(row[f]) < 0));
+    if (!row.sku) row.error = 'رقم الصنف فاضي';
+    else if (seen.has(k)) row.error = 'مكرر بنفس الملف';
+    else if (!row.name && !existing.has(k)) row.error = 'اسم الصنف فاضي';
+    else if (bad) row.error = `قيمة غير صحيحة في ${BI_FIELDS.find(f => f.key === bad).label}`;
+    if (row.sku) seen.add(k);
+    if (!row.error && existing.has(k)) { row.existingId = existing.get(k).id; row.status = bi.updateExisting ? 'update' : 'skip'; }
+    else if (!row.error) row.status = 'new';
+    return row;
+  });
+}
+function downloadItemsImportTemplate() {
+  downloadExcelTemplate('قالب استيراد الأصناف.xlsx',
+    ['رقم الصنف','اسم الصنف','الفئة','الوحدة','التكلفة','سعر البيع','سعر 2','سعر 3','الكمية','الباركود','الرقم البديل','رقم الشركة','الموقع'],
+    ['15601-31090','فلتر زيت تويوتا كامري','فلاتر','حبة','18','30','27','25','10','6281234567890','15601-33021 / 90915-YZZE1','TOYOTA','A-01']);
+}
 function renderBulkImportModal() {
+  const bi = state.bulkImport;
   const rows = state.bulkImportRows;
-  const validCount = rows.filter(r => !r.error).length;
-  const errorCount = rows.length - validCount;
+  const cnt = s => rows.filter(r => r.status === s).length;
+  const nNew = cnt('new'), nUpd = cnt('update'), nSkip = cnt('skip'), nErr = rows.filter(r => r.error).length;
+  const toImport = nNew + nUpd;
+  const colLetter = i => { let s = ''; i++; while (i > 0) { const m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26); } return s; };
+  const headers = bi ? (bi.raw[bi.headerRow] || []) : [];
+  const ncols = bi ? Math.max(...bi.raw.slice(0, 50).map(r => r.length), 0) : 0;
+  const statusCell = r => r.error ? `<span style="color:#C0392B;">✕ ${escapeHtml(r.error)}</span>`
+    : r.status === 'new' ? '<span style="color:#0F6E56;">جديد ✓</span>'
+    : r.status === 'update' ? '<span style="color:#2C4A6E;">تحديث ↻</span>'
+    : '<span style="color:#BA7517;">موجود — بيتجاهل</span>';
   return `
   <div id="bulk-import-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;padding:16px;z-index:20;">
-    <div style="background:#fff;border:1px solid #1B3352;border-radius:14px;width:100%;max-width:900px;max-height:90vh;overflow-y:auto;box-shadow:0 24px 60px rgba(0,0,0,0.35);" onclick="event.stopPropagation()">
+    <div style="background:#fff;border:1px solid #1B3352;border-radius:14px;width:100%;max-width:1000px;max-height:92vh;overflow-y:auto;box-shadow:0 24px 60px rgba(0,0,0,0.35);" onclick="event.stopPropagation()">
       <div class="win-title"><span><i class="ti ti-file-spreadsheet"></i> استيراد أصناف من Excel</span><button id="bulk-import-close" style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
       <div style="padding:18px;">
-        ${rows.length === 0 ? `
-        <div style="text-align:center;padding:30px;border:2px dashed #C7C4B4;border-radius:12px;">
+        ${!bi ? `
+        <div style="text-align:center;padding:26px;border:2px dashed #C7C4B4;border-radius:12px;">
           <i class="ti ti-file-spreadsheet" style="font-size:42px;color:#8B8A7A;"></i>
-          <div style="font-size:13px;color:#3A3826;margin:10px 0;">اختر ملف Excel (.xlsx) فيه أعمدة الأصناف</div>
-          <input id="bulk-import-file" type="file" accept=".xlsx,.xls" style="margin:10px auto;display:block;" />
-          <div style="font-size:11px;color:#8B8A7A;margin-top:14px;text-align:right;background:#F4F1EA;padding:10px 14px;border-radius:8px;">
-            <b>الأعمدة المتوقعة (بالترتيب، بأي أسماء عناوين):</b><br/>
-            رقم الصنف (SKU) — إجباري | اسم الصنف — إجباري | الفئة | الوحدة | التكلفة | سعر البيع | الكمية | الباركود
+          <div style="font-size:13px;color:#3A3826;margin:10px 0;">اختر ملف Excel فيه الأصناف — أي ترتيب أعمدة، والبرنامج يتعرّف عليها وتقدر تعدّلها قبل الاستيراد</div>
+          <label class="btn primary" style="padding:9px 18px;cursor:pointer;display:inline-flex;gap:6px;align-items:center;"><i class="ti ti-upload"></i> اختيار الملف<input id="bulk-import-file" type="file" accept=".xlsx,.xls,.csv" style="display:none;" /></label>
+          <button id="bulk-import-template" class="btn" style="padding:9px 18px;margin-right:8px;"><i class="ti ti-download"></i> تنزيل قالب جاهز</button>
+          <div style="font-size:11.5px;color:#5F5E5A;margin-top:16px;text-align:right;background:#F4F1EA;padding:10px 14px;border-radius:8px;line-height:1.9;">
+            <b>الإجباري:</b> رقم الصنف + اسم الصنف. والباقي اختياري: الفئة، الوحدة، التكلفة، سعر البيع، سعر 2، سعر 3، الكمية، الباركود، الرقم البديل، رقم الشركة، الموقع.<br/>
+            • الأرقام تُقبل بالفواصل والأرقام العربية (١٢٥ أو 1,250).<br/>
+            • أكثر من رقم بديل بنفس الخانة: افصل بينها بـ / أو فاصلة.<br/>
+            • الكمية تنزل بالمستودع الافتراضي مع سند جرد افتتاحي وقيد تلقائي.
           </div>
+        </div>` : `
+        <div style="font-size:12px;color:#5F5E5A;margin-bottom:8px;"><i class="ti ti-file"></i> ${escapeHtml(bi.fileName)} — الورقة: 
+          <select id="bi-sheet" class="input" style="display:inline-block;width:auto;padding:3px 8px;font-size:12px;">${bi.sheets.map(n => `<option ${n === bi.sheet ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}</select>
+          — صف العناوين: <input id="bi-header-row" type="number" min="1" class="input mono" style="display:inline-block;width:60px;padding:3px 6px;font-size:12px;" value="${bi.headerRow + 1}" />
         </div>
-        ` : `
-        <div style="display:flex;gap:10px;margin-bottom:12px;font-size:12.5px;">
-          <span style="color:#0F6E56;font-weight:600;">✓ ${validCount} صنف صالح للاستيراد</span>
-          ${errorCount ? `<span style="color:#C0392B;font-weight:600;">✕ ${errorCount} صف فيه خطأ (بيتجاهل)</span>` : ''}
+        <div style="border:1px solid #DEDACB;border-radius:10px;padding:10px 12px;background:#FAF9F4;margin-bottom:12px;">
+          <div style="font-size:12.5px;font-weight:700;color:#1B3352;margin-bottom:8px;"><i class="ti ti-arrows-left-right"></i> ربط الأعمدة — تأكد إن كل حقل مربوط بالعمود الصحيح</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px;">
+            ${BI_FIELDS.map(f => `<label style="font-size:11.5px;color:${f.req ? '#1B3352' : '#5F5E5A'};font-weight:${f.req ? '700' : '400'};">${f.label}${f.req ? ' *' : ''}
+              <select data-bi-map="${f.key}" class="input" style="padding:4px 6px;font-size:12px;margin-top:2px;${bi.colMap[f.key] >= 0 ? 'border-color:#0F6E56;background:#F2FAF6;' : f.req ? 'border-color:#C0392B;background:#FCEBEB;' : ''}">
+                <option value="-1">— بدون —</option>
+                ${Array.from({ length: ncols }, (_, i) => `<option value="${i}" ${bi.colMap[f.key] === i ? 'selected' : ''}>${colLetter(i)}: ${escapeHtml(String(headers[i] ?? '').slice(0, 25) || '(بدون عنوان)')}</option>`).join('')}
+              </select></label>`).join('')}
+          </div>
+          <label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:12.5px;cursor:pointer;">
+            <input id="bi-update-existing" type="checkbox" ${bi.updateExisting ? 'checked' : ''} style="width:16px;height:16px;" />
+            <span><b>تحديث الأصناف الموجودة</b> (الاسم والأسعار والتكلفة والبيانات) — الكمية للأصناف الموجودة ما تتغير، عدّلها بسند جرد.</span>
+          </label>
         </div>
-        <div style="max-height:400px;overflow-y:auto;border:1px solid #E4E2DA;border-radius:10px;">
+        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:10px;font-size:12.5px;font-weight:600;">
+          <span style="color:#0F6E56;">✓ ${nNew} صنف جديد</span>
+          ${nUpd ? `<span style="color:#2C4A6E;">↻ ${nUpd} تحديث</span>` : ''}
+          ${nSkip ? `<span style="color:#BA7517;">${nSkip} موجود مسبقاً (بيتجاهل)</span>` : ''}
+          ${nErr ? `<span style="color:#C0392B;">✕ ${nErr} صف فيه خطأ (بيتجاهل)</span>` : ''}
+        </div>
+        <div style="max-height:340px;overflow:auto;border:1px solid #E4E2DA;border-radius:10px;">
           <table style="width:100%;border-collapse:collapse;font-size:12px;">
-            <thead><tr style="background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;">
-              ${['#','رقم الصنف','الاسم','الفئة','الوحدة','التكلفة','السعر','الكمية','الحالة'].map(h=>`<th style="padding:6px 8px;text-align:right;">${h}</th>`).join('')}
+            <thead><tr style="background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;position:sticky;top:0;">
+              ${['صف','رقم الصنف','الاسم','الفئة','الوحدة','التكلفة','السعر','الكمية','البديل','الحالة'].map(h => `<th style="padding:6px 8px;text-align:right;white-space:nowrap;">${h}</th>`).join('')}
             </tr></thead>
             <tbody>
-              ${rows.map((r,i) => `
-                <tr style="background:${r.error?'#FCEBEB':i%2?'#F4F1EA':'#fff'};border-bottom:1px solid #EDEAE0;">
-                  <td style="padding:5px 8px;">${i+1}</td>
-                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.sku||'')}</td>
-                  <td style="padding:5px 8px;">${escapeHtml(r.name||'')}</td>
-                  <td style="padding:5px 8px;">${escapeHtml(r.category||'')}</td>
-                  <td style="padding:5px 8px;">${escapeHtml(r.unit||'')}</td>
-                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.cost||'')}</td>
-                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.price||'')}</td>
-                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.qty||'')}</td>
-                  <td style="padding:5px 8px;font-size:11px;color:${r.error?'#C0392B':'#0F6E56'};">${r.error || 'صالح ✓'}</td>
-                </tr>`).join('')}
+              ${rows.slice(0, 300).map((r, i) => `
+                <tr style="background:${r.error ? '#FCEBEB' : r.status === 'skip' ? '#FDF6E8' : i % 2 ? '#F4F1EA' : '#fff'};border-bottom:1px solid #EDEAE0;">
+                  <td style="padding:5px 8px;color:#8B8A7A;" class="mono">${r.line}</td>
+                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.sku)}</td>
+                  <td style="padding:5px 8px;">${escapeHtml(r.name)}</td>
+                  <td style="padding:5px 8px;">${escapeHtml(r.category)}</td>
+                  <td style="padding:5px 8px;">${escapeHtml(r.unit)}</td>
+                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.cost)}</td>
+                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.price)}</td>
+                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.qty)}</td>
+                  <td style="padding:5px 8px;" class="mono">${escapeHtml(r.alt)}</td>
+                  <td style="padding:5px 8px;font-size:11px;white-space:nowrap;">${statusCell(r)}</td>
+                </tr>`).join('') || `<tr><td colspan="10" style="padding:16px;text-align:center;color:#6E6D5F;">ما فيه صفوف بيانات تحت صف العناوين</td></tr>`}
             </tbody>
           </table>
         </div>
-        <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end;">
-          <button id="bulk-import-cancel" class="btn" style="padding:8px 16px;">إلغاء</button>
-          <button id="bulk-import-confirm" class="btn primary" style="padding:8px 16px;" ${validCount===0?'disabled':''}>${state.bulkImportBusy?'...جاري الاستيراد':`استيراد ${validCount} صنف`}</button>
-        </div>
-        `}
-        ${state.bulkImportResult ? `<div style="margin-top:14px;padding:10px 14px;background:#E1F5EE;border:1px solid #0F6E56;border-radius:8px;font-size:12.5px;color:#0F6E56;font-weight:600;">${state.bulkImportResult}</div>` : ''}
+        ${rows.length > 300 ? `<div style="font-size:11px;color:#5F5E5A;margin-top:6px;">معروض أول 300 صف من ${rows.length} — الاستيراد يشمل الكل.</div>` : ''}
+        <div style="display:flex;gap:10px;margin-top:14px;justify-content:flex-end;align-items:center;">
+          ${state.bulkImportBusy ? `<span style="font-size:12px;color:#5F5E5A;margin-left:auto;">${escapeHtml(state.bulkImportProgress || '')}</span>` : ''}
+          <button id="bulk-import-cancel" class="btn" style="padding:8px 16px;" ${state.bulkImportBusy ? 'disabled' : ''}>ملف آخر</button>
+          <button id="bulk-import-confirm" class="btn primary" style="padding:8px 16px;" ${toImport === 0 || state.bulkImportBusy ? 'disabled' : ''}>${state.bulkImportBusy ? '...جاري الاستيراد' : `استيراد ${nNew} جديد${nUpd ? ` + تحديث ${nUpd}` : ''}`}</button>
+        </div>`}
+        ${state.bulkImportResult ? `<div style="margin-top:14px;padding:10px 14px;background:${state.bulkImportResultErr ? '#FCEBEB' : '#E1F5EE'};border:1px solid ${state.bulkImportResultErr ? '#C0392B' : '#0F6E56'};border-radius:8px;font-size:12.5px;color:${state.bulkImportResultErr ? '#C0392B' : '#0F6E56'};font-weight:600;white-space:pre-line;">${escapeHtml(state.bulkImportResult)}</div>` : ''}
       </div>
     </div>
   </div>`;
@@ -16394,6 +16511,7 @@ function bindAppEvents() {
   if (document.getElementById('bulk-import-items-btn')) {
     document.getElementById('bulk-import-items-btn').onclick = () => {
       state.showBulkImport = true;
+      state.bulkImport = null;
       state.bulkImportRows = [];
       state.bulkImportResult = null;
       render();
@@ -16786,68 +16904,154 @@ function bindAppEvents() {
   }
 
   if (state.showBulkImport) {
-    document.getElementById('bulk-import-close').onclick = () => { state.showBulkImport = false; render(); };
+    document.getElementById('bulk-import-close').onclick = () => { if (state.bulkImportBusy) return; state.showBulkImport = false; state.bulkImport = null; render(); };
+    if (document.getElementById('bulk-import-template')) document.getElementById('bulk-import-template').onclick = downloadItemsImportTemplate;
     if (document.getElementById('bulk-import-cancel')) {
-      document.getElementById('bulk-import-cancel').onclick = () => { state.bulkImportRows = []; render(); };
+      document.getElementById('bulk-import-cancel').onclick = () => { state.bulkImport = null; state.bulkImportRows = []; state.bulkImportResult = null; render(); };
     }
+    const loadSheet = (wb, sheetName) => {
+      const raw = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: '', raw: false, blankrows: true });
+      const hr = biFindHeaderRow(raw);
+      let colMap = biDetectColumns(raw[hr.row] || []);
+      // ما فيه أي عنوان معروف → نفترض الترتيب الافتراضي للأعمدة (رقم، اسم، فئة، وحدة، تكلفة، سعر، كمية، باركود)
+      if (hr.count === 0) colMap = { sku: 0, name: 1, category: 2, unit: 3, cost: 4, price: 5, price2: -1, price3: -1, qty: 6, barcode: 7, alt: -1, company: -1, location1: -1 };
+      return { raw, headerRow: hr.count === 0 ? -1 : hr.row, colMap };
+    };
     if (document.getElementById('bulk-import-file')) {
       document.getElementById('bulk-import-file').onchange = async (ev) => {
         const file = ev.target.files[0];
         if (!file) return;
-        const data = await file.arrayBuffer();
-        const wb = XLSX.read(data, { type: 'array' });
-        const sheet = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-        if (rows.length < 2) { showToast('الملف فاضي أو ما فيه بيانات', 'error'); return; }
-        const headers = rows[0].map(h => String(h).trim());
-        // نطابق كل عمود مع الحقل المناسب بالبحث عن كلمات مفتاحية بعنوانه (يدعم عربي/إنجليزي بأي ترتيب)
-        const findCol = (keywords) => headers.findIndex(h => keywords.some(k => h.includes(k)));
-        const colMap = {
-          sku: findCol(['رقم الصنف', 'sku', 'كود']),
-          name: findCol(['اسم الصنف', 'الاسم', 'name']),
-          category: findCol(['الفئة', 'category', 'تصنيف']),
-          unit: findCol(['الوحدة', 'unit']),
-          cost: findCol(['التكلفة', 'cost']),
-          price: findCol(['سعر البيع', 'السعر', 'price']),
-          qty: findCol(['الكمية', 'qty', 'quantity']),
-          barcode: findCol(['الباركود', 'barcode']),
-        };
-        const existingSkus = new Set(state.items.map(it => it.sku));
-        const parsed = rows.slice(1).filter(r => r.some(c => String(c).trim())).map(r => {
-          const get = (key) => colMap[key] >= 0 ? String(r[colMap[key]]||'').trim() : '';
-          const row = { sku: get('sku'), name: get('name'), category: get('category'), unit: get('unit')||'حبة', cost: get('cost')||'0', price: get('price')||'0', qty: get('qty')||'0', barcode: get('barcode') };
-          if (!row.sku) row.error = 'رقم الصنف مطلوب';
-          else if (!row.name) row.error = 'اسم الصنف مطلوب';
-          else if (existingSkus.has(row.sku)) row.error = 'رقم الصنف موجود مسبقاً بالنظام';
-          else if (isNaN(Number(row.cost)) || isNaN(Number(row.price)) || isNaN(Number(row.qty))) row.error = 'قيمة رقمية غير صحيحة';
-          return row;
-        });
-        state.bulkImportRows = parsed;
-        state.bulkImportResult = null;
-        render();
+        if (typeof XLSX === 'undefined') { alert('مكتبة Excel ما تحمّلت، تأكد من الاتصال بالإنترنت'); return; }
+        try {
+          const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
+          // نختار أول ورقة فيها بيانات
+          const sheet = wb.SheetNames.find(n => XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, blankrows: false }).length > 0) || wb.SheetNames[0];
+          const ld = loadSheet(wb, sheet);
+          if (!ld.raw.length) { showToast('الملف فاضي', 'error'); return; }
+          state.bulkImport = { wb, fileName: file.name, sheets: wb.SheetNames, sheet, ...ld, updateExisting: false };
+          state.bulkImportRows = biBuildRows();
+          state.bulkImportResult = null;
+          if (!state.warehouses?.length) await loadWarehouses();
+          render();
+        } catch (e) { console.error(e); showToast('ما قدرت أقرأ الملف — تأكد إنه ملف Excel سليم', 'error'); }
       };
+    }
+    const bi = state.bulkImport;
+    if (bi) {
+      const rebuild = () => { state.bulkImportRows = biBuildRows(); render(); };
+      document.getElementById('bi-sheet').onchange = (ev) => { Object.assign(bi, { sheet: ev.target.value }, loadSheet(bi.wb, ev.target.value)); rebuild(); };
+      document.getElementById('bi-header-row').onchange = (ev) => {
+        const n = Math.max(0, (parseInt(ev.target.value, 10) || 1) - 1);
+        bi.headerRow = n; bi.colMap = biDetectColumns(bi.raw[n] || []); rebuild();
+      };
+      document.querySelectorAll('[data-bi-map]').forEach(sel => {
+        sel.onchange = () => {
+          const key = sel.dataset.biMap, v = Number(sel.value);
+          if (v >= 0) Object.keys(bi.colMap).forEach(k => { if (k !== key && bi.colMap[k] === v) bi.colMap[k] = -1; }); // عمود واحد لحقل واحد
+          bi.colMap[key] = v; rebuild();
+        };
+      });
+      document.getElementById('bi-update-existing').onchange = (ev) => { bi.updateExisting = ev.target.checked; rebuild(); };
     }
     if (document.getElementById('bulk-import-confirm')) {
       document.getElementById('bulk-import-confirm').onclick = async () => {
-        const validRows = state.bulkImportRows.filter(r => !r.error);
-        if (!validRows.length) return;
-        state.bulkImportBusy = true; render();
-        const payload = validRows.map(r => ({
-          sku: r.sku, name: r.name, category: r.category || null, unit: r.unit,
-          cost: Number(r.cost), price: Number(r.price), qty: Number(r.qty), barcode: r.barcode || null, active: true,
-        }));
-        const { error } = await sb.from('items').insert(payload);
-        state.bulkImportBusy = false;
-        if (error) {
-          state.bulkImportResult = null;
-          showToast('فشل الاستيراد: ' + error.message, 'error');
-          render();
-          return;
+        const rows = state.bulkImportRows;
+        const newRows = rows.filter(r => r.status === 'new');
+        const updRows = rows.filter(r => r.status === 'update');
+        if (!newRows.length && !updRows.length) return;
+        if (!confirm(`تأكيد الاستيراد:\n• ${newRows.length} صنف جديد\n• ${updRows.length} تحديث لأصناف موجودة\n\nتكمل؟`)) return;
+        state.bulkImportBusy = true; state.bulkImportResult = null;
+        const progress = (t) => { state.bulkImportProgress = t; render(); };
+        const n = v => v === '' ? null : Number(v);
+        const failed = [];
+        const createdIds = {}; // sku -> id
+        let maxReg = state.items.reduce((max, it) => { const m = (it.registry_number || '').match(/(\d+)$/); return m ? Math.max(max, parseInt(m[1], 10)) : max; }, 0);
+        const toPayload = r => ({
+          sku: r.sku, name: r.name, category: r.category || null, unit: r.unit || 'حبة',
+          cost: n(r.cost) || 0, price: n(r.price) || 0, price2: n(r.price2), price3: n(r.price3), qty: n(r.qty) || 0,
+          barcode: r.barcode || null, company: r.company || null, location1: r.location1 || null,
+          registry_number: `REG-${String(++maxReg).padStart(5, '0')}`, active: true,
+        });
+        // 1) الأصناف الجديدة — دفعات 200، ولو فشلت دفعة نجرّب صف صف عشان ما يضيع الباقي
+        for (let i = 0; i < newRows.length; i += 200) {
+          progress(`إضافة الأصناف الجديدة ${Math.min(i + 200, newRows.length)} / ${newRows.length}`);
+          const chunk = newRows.slice(i, i + 200);
+          const payload = chunk.map(toPayload);
+          const { data, error } = await sb.from('items').insert(payload).select('id, sku');
+          if (!error) { (data || []).forEach(d => createdIds[d.sku] = d.id); continue; }
+          for (let j = 0; j < chunk.length; j++) {
+            const { data: d1, error: e1 } = await sb.from('items').insert(payload[j]).select('id, sku').single();
+            if (e1) failed.push(`صف ${chunk[j].line} (${chunk[j].sku}): ${e1.message}`); else createdIds[d1.sku] = d1.id;
+          }
         }
-        logActivity('استيراد جماعي للأصناف', `${validRows.length} صنف`);
+        // 2) تحديث الموجود (بدون الكمية)
+        let updated = 0;
+        for (let i = 0; i < updRows.length; i += 10) {
+          progress(`تحديث الأصناف الموجودة ${Math.min(i + 10, updRows.length)} / ${updRows.length}`);
+          await Promise.all(updRows.slice(i, i + 10).map(async r => {
+            const up = {};
+            const m = bi.colMap;
+            if (m.name >= 0 && r.name) up.name = r.name;
+            if (m.category >= 0 && r.category) up.category = r.category;
+            if (m.unit >= 0 && r.unit) up.unit = r.unit;
+            ['cost', 'price', 'price2', 'price3'].forEach(k => { if (m[k] >= 0 && r[k] !== '') up[k] = Number(r[k]); });
+            ['barcode', 'company', 'location1'].forEach(k => { if (m[k] >= 0 && r[k]) up[k] = r[k]; });
+            if (!Object.keys(up).length) { updated++; return; }
+            const { error } = await sb.from('items').update(up).eq('id', r.existingId);
+            if (error) failed.push(`صف ${r.line} (${r.sku}): ${error.message}`); else updated++;
+          }));
+        }
+        // 3) الأرقام البديلة
+        const altRows = [];
+        [...newRows, ...updRows].forEach(r => {
+          const id = r.existingId || createdIds[r.sku]; if (!id || !r.alt) return;
+          const have = new Set(((state.itemAltNumbersMap || {})[id] || []).map(normAltCode));
+          r.alt.split(/[\/,،;|\n]+/).map(x => x.trim()).filter(Boolean).forEach(a => {
+            if (have.has(normAltCode(a)) || normAltCode(a) === normAltCode(r.sku)) return;
+            have.add(normAltCode(a)); altRows.push({ item_id: id, alt_number: a });
+          });
+        });
+        for (let i = 0; i < altRows.length; i += 500) {
+          progress('تسجيل الأرقام البديلة...');
+          const { error } = await sb.from('item_alternative_numbers').insert(altRows.slice(i, i + 500));
+          if (error) failed.push('الأرقام البديلة: ' + error.message);
+        }
+        // 4) الكميات الافتتاحية للأصناف الجديدة: رصيد المستودع + سند جرد معتمد + قيد واحد
+        const qtyRows = newRows.filter(r => createdIds[r.sku] && Number(r.qty) > 0);
+        const whId = defaultWarehouseId();
+        if (qtyRows.length && whId) {
+          progress('تسجيل الكميات الافتتاحية...');
+          const { error: wsErr } = await sb.from('item_warehouse_stock').insert(qtyRows.map(r => ({ item_id: createdIds[r.sku], warehouse_id: whId, qty: Number(r.qty) })));
+          if (wsErr) failed.push('رصيد المستودع: ' + wsErr.message);
+          const { data: lastCounts } = await sb.from('stock_counts').select('count_number').order('created_at', { ascending: false }).limit(50);
+          const maxNum = (lastCounts || []).reduce((max, c) => { const m = (c.count_number || '').match(/(\d+)$/); return m ? Math.max(max, parseInt(m[1], 10)) : max; }, 0);
+          const today = new Date().toISOString().slice(0, 10);
+          const { data: sc, error: scErr } = await sb.from('stock_counts').insert({ count_number: String(maxNum + 1), warehouse_id: whId, count_date: today, notes: `رصيد افتتاحي — استيراد ${qtyRows.length} صنف من Excel`, approved: true, created_by: state.session.user.id }).select().single();
+          if (scErr) failed.push('سند الجرد الافتتاحي: ' + scErr.message);
+          if (sc) {
+            for (let i = 0; i < qtyRows.length; i += 500) {
+              const { error } = await sb.from('stock_count_items').insert(qtyRows.slice(i, i + 500).map(r => ({ count_id: sc.id, item_id: createdIds[r.sku], system_qty: 0, counted_qty: Number(r.qty) })));
+              if (error) failed.push('أصناف سند الجرد: ' + error.message);
+            }
+            const value = Math.round(qtyRows.reduce((s, r) => s + Number(r.qty) * (Number(r.cost) || 0), 0) * 100) / 100;
+            if (value > 0) {
+              const je = await postJournalEntry(today, `رصيد افتتاحي — استيراد أصناف (${qtyRows.length} صنف)`, 'stock_count', sc.id, [
+                { account_code: acc('inventory'), debit: value, credit: 0, description: 'مخزون افتتاحي' },
+                { account_code: acc('opening_capital'), debit: 0, credit: value, description: 'ضمن رأس المال الافتتاحي' },
+              ]);
+              if (!je) failed.push('قيد الرصيد الافتتاحي ما ترحّل — راجع دليل الحسابات');
+            }
+          }
+        }
+        const created = Object.keys(createdIds).length;
+        logActivity('استيراد جماعي للأصناف', `${created} جديد، ${updated} تحديث`);
         await loadItems();
-        state.bulkImportRows = [];
-        state.bulkImportResult = `تم استيراد ${validRows.length} صنف بنجاح ✓`;
+        await loadAllAltNumbersMap();
+        state.bulkImportBusy = false; state.bulkImportProgress = '';
+        state.bulkImport = null; state.bulkImportRows = [];
+        state.bulkImportResultErr = failed.length > 0;
+        state.bulkImportResult = `تم: ${created} صنف جديد${updated ? `، ${updated} تحديث` : ''}${altRows.length ? `، ${altRows.length} رقم بديل` : ''}${qtyRows.length ? `، كميات افتتاحية لـ ${qtyRows.length} صنف` : ''} ✓`
+          + (failed.length ? `\n\n⚠️ ${failed.length} مشكلة:\n` + failed.slice(0, 15).join('\n') + (failed.length > 15 ? `\n... و${failed.length - 15} غيرها` : '') : '');
         render();
       };
     }
