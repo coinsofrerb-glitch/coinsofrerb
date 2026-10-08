@@ -2383,6 +2383,7 @@ const SALES_SUBMENU = [
   { label: 'كشف فواتير المبيعات', target: '__report_sales_invoices__' },
   { label: 'كشف عروض الأسعار', target: '__report_quotations__' },
   { label: 'كشف مردودات المبيعات', target: '__report_sales_returns__' },
+  { label: 'أسعار بيع صنف', target: '__item_sale_prices__' },
   { divider: true },
   { label: 'كشف الإقرار الضريبي', target: '__vat_report__' },
   { label: 'رسم بياني مبيعات ومشتريات', target: '__sales_chart__' },
@@ -2568,6 +2569,7 @@ function renderApp() {
   ${state.showQuickNewItem ? renderQuickNewItemModal() : ''}
   ${state.showGlobalSearch ? renderGlobalSearchModal() : ''}
   ${renderActiveItemBar()}
+  ${state.ph ? renderPriceHistoryModal() : ''}
   ${state.showQuickOpen ? renderQuickOpenModal() : ''}
   ${state.showReopenDoc ? renderReopenDocModal() : ''}
   ${state.showInventoryStats ? renderInventoryStatsModal() : ''}
@@ -4326,6 +4328,7 @@ const REPORTS_HUB_CATEGORIES = [
     { label:'كشف فواتير المبيعات', target:'__report_sales_invoices__', desc:'كل فواتير البيع بفترة معيّنة' },
     { label:'كشف عروض الأسعار', target:'__report_quotations__', desc:'كل عروض الأسعار المُرسلة' },
     { label:'كشف مردودات المبيعات', target:'__report_sales_returns__', desc:'كل مردودات البيع المسجّلة' },
+    { label:'أسعار بيع صنف', target:'__item_sale_prices__', desc:'كل الأسعار اللي انباع بيها الصنف بالتواريخ والعملاء' },
   ]},
   { key:'purchases', label:'المشتريات', icon:'ti-shopping-cart', reports: [
     { label:'كشف فواتير المشتريات', target:'__purchases_report__', desc:'كل فواتير الشراء بفترة معيّنة' },
@@ -6488,21 +6491,228 @@ function saveLabelFormat(fmt) {
 }
 
 // بار ثابت بأسفل الشاشة كاملة، يبقى ظاهر طول ما الفاتورة مفتوحة، ويتحدّث لما تنتقل بين أصناف الفاتورة
+function normAltCode(v) { return String(v || '').trim().toLowerCase().replace(/[\s\-_.\/]/g, ''); }
+// الأصناف البديلة: تشترك مع الصنف في رقم بديل، أو رقمها الأساسي مسجّل كبديل له (والعكس)
+function findAlternativeItems(it) {
+  if (!it) return [];
+  const map = state.itemAltNumbersMap || {};
+  const keys = new Set([normAltCode(it.sku), ...(map[it.id] || []).map(normAltCode)].filter(Boolean));
+  if (!keys.size) return [];
+  return state.items.filter(x => x.id !== it.id && (keys.has(normAltCode(x.sku)) || (map[x.id] || []).some(a => keys.has(normAltCode(a)))))
+    .sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0));
+}
 function renderActiveItemBar() {
   if (!state.activeBarItemId) return '';
   const it = state.items.find(x => x.id === state.activeBarItemId);
   if (!it) return '';
+  const admin = isAdmin();
+  const alts = (state.itemAltNumbersMap || {})[it.id] || [];
+  const altShown = alts.slice(0, 6);
+  const altItems = findAlternativeItems(it);
+  const altAvail = altItems.filter(x => Number(x.qty || 0) > 0);
+  const outOfStock = Number(it.qty) <= 0;
+  const chip = 'display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,0.18);border:1px solid rgba(255,255,255,0.35);color:#fff;border-radius:12px;padding:2px 9px;font-size:11.5px;cursor:pointer;';
+  const secondRow = (alts.length || altItems.length) ? `
+    <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,0.25);padding-top:8px;">
+      ${alts.length ? `<span style="font-size:11px;opacity:0.85;"><i class="ti ti-arrows-exchange"></i> الأرقام البديلة:</span>
+        ${altShown.map(a => `<button type="button" data-bar-copy="${escapeHtml(a)}" class="mono" style="${chip}" title="اضغط للنسخ">${escapeHtml(a)}</button>`).join('')}
+        ${alts.length > altShown.length ? `<span style="font-size:11px;opacity:0.85;" title="${escapeHtml(alts.slice(6).join(' · '))}">+${alts.length - altShown.length}</span>` : ''}` : ''}
+      ${altItems.length ? `<span style="font-size:11px;opacity:0.85;margin-right:${alts.length ? '10px' : '0'};"><i class="ti ti-replace"></i> ${outOfStock ? '<b style="color:#FFE08A;">بديل متوفر:</b>' : 'أصناف بديلة:'}</span>
+        ${(altAvail.length ? altAvail : altItems).slice(0, 4).map(x => `<button type="button" data-bar-alt-item="${x.id}" style="${chip}${Number(x.qty) > 0 ? '' : 'opacity:0.6;'}" title="اضغط لاختياره بدل هذا الصنف">${escapeHtml(x.name)} <span class="mono" style="opacity:0.8;">(${escapeHtml(x.sku || '')})</span> — <span class="mono" style="font-weight:700;">${x.qty}</span></button>`).join('')}
+        ${outOfStock && !altAvail.length ? '<span style="font-size:11px;color:#FFD8D8;">كل البدائل خلصانة</span>' : ''}` : ''}
+    </div>` : '';
   return `
-  <div id="active-item-bar" class="no-print" style="position:fixed;bottom:0;right:0;left:0;background:linear-gradient(90deg,#6C3FA8,#8E5BC7);color:#fff;padding:12px 20px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;z-index:45;box-shadow:0 -4px 16px rgba(0,0,0,0.25);">
+  <div id="active-item-bar" class="no-print" style="position:fixed;bottom:0;right:0;left:0;background:linear-gradient(90deg,#6C3FA8,#8E5BC7);color:#fff;padding:10px 20px;display:flex;align-items:center;gap:8px 20px;flex-wrap:wrap;z-index:45;box-shadow:0 -4px 16px rgba(0,0,0,0.25);">
     <div style="font-weight:700;font-size:13px;">${escapeHtml(it.name)} <span class="mono" style="font-weight:400;opacity:0.8;">(${escapeHtml(it.sku)})</span></div>
     <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-tag"></i><span style="font-size:11px;opacity:0.85;">سعر 1:</span><span class="mono" style="font-weight:700;">${fmt(it.price)}</span></div>
     ${Number(it.price2) > 0 ? `<div style="display:flex;align-items:center;gap:6px;"><span style="font-size:11px;opacity:0.85;">سعر 2:</span><span class="mono" style="font-weight:700;">${fmt(it.price2)}</span></div>` : ''}
     ${Number(it.price3) > 0 ? `<div style="display:flex;align-items:center;gap:6px;"><span style="font-size:11px;opacity:0.85;">سعر 3:</span><span class="mono" style="font-weight:700;">${fmt(it.price3)}</span></div>` : ''}
-    <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-receipt"></i><span style="font-size:11px;opacity:0.85;">التكلفة:</span><span class="mono" style="font-weight:700;">${fmt(it.cost)}</span></div>
+    ${admin ? `<div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-receipt"></i><span style="font-size:11px;opacity:0.85;">التكلفة:</span><span class="mono" style="font-weight:700;">${fmt(it.cost)}</span></div>` : ''}
     <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-map-pin"></i><span style="font-size:11px;opacity:0.85;">الموقع:</span><span class="mono" style="font-weight:700;">${escapeHtml([it.location1,it.location2,it.location3,it.location4].filter(Boolean).join(' / ') || '—')}</span></div>
-    <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-boxes"></i><span style="font-size:11px;opacity:0.85;">الكمية بالمخزون:</span><span class="mono" style="font-weight:700;color:${Number(it.qty)<=0?'#FFD8D8':'#fff'};">${it.qty}</span></div>
+    <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-boxes"></i><span style="font-size:11px;opacity:0.85;">الكمية بالمخزون:</span><span class="mono" style="font-weight:700;color:${outOfStock?'#FFD8D8':'#fff'};">${it.qty}</span></div>
+    <button type="button" data-bar-history="${it.id}" style="${chip}font-size:12px;padding:4px 12px;" title="سجل أسعار البيع بالتواريخ (F3)"><i class="ti ti-history"></i> سجل الأسعار</button>
     <button id="active-item-bar-close" class="no-print" style="margin-right:auto;background:rgba(255,255,255,0.2);border:none;color:#fff;width:22px;height:22px;border-radius:50%;cursor:pointer;">✕</button>
+    ${secondRow}
   </div>`;
+}
+function refreshActiveItemBar() {
+  const bar = document.getElementById('active-item-bar');
+  const html = renderActiveItemBar();
+  if (bar) { if (html) bar.outerHTML = html; else bar.remove(); }
+  else if (html) document.body.insertAdjacentHTML('beforeend', html);
+}
+
+// ---------- سجل أسعار بيع الصنف (من فاتورة البيع، ومن التقارير) ----------
+async function loadItemSaleHistory(itemId, { from = '', to = '', limit = 500 } = {}) {
+  let q = sb.from('sales_invoice_items')
+    .select('quantity, unit_price, tax_percent, sales_invoices!inner(id, invoice_date, invoice_number, approved, customer_id, walkin_customer_name, parties(name))')
+    .eq('item_id', itemId).eq('sales_invoices.approved', true);
+  if (from) q = q.gte('sales_invoices.invoice_date', from);
+  if (to) q = q.lte('sales_invoices.invoice_date', to);
+  const { data, error } = await q.limit(limit);
+  if (error || !data) return [];
+  return data.map(r => ({
+    date: r.sales_invoices.invoice_date || '', invoiceNumber: r.sales_invoices.invoice_number || '',
+    customerId: r.sales_invoices.customer_id || null,
+    customerName: r.sales_invoices.parties?.name || r.sales_invoices.walkin_customer_name || 'عميل نقدي',
+    qty: Number(r.quantity || 0), price: Number(r.unit_price || 0), tax: Number(r.tax_percent || 0),
+  })).sort((a, b) => b.date.localeCompare(a.date) || String(b.invoiceNumber).localeCompare(String(a.invoiceNumber), undefined, { numeric: true }));
+}
+async function openPriceHistory(itemId, mode = 'sales') {
+  const inSales = mode === 'sales' && state.activeSection === 'المبيعات' && !!document.getElementById('si-item-price');
+  const customerId = inSales ? (state.salesForm?.customer_id || '') : '';
+  state.ph = { mode: inSales ? 'sales' : 'report', itemId: itemId || '', itemQuery: '', customerId, tab: customerId ? 'customer' : 'all', from: '', to: '', rows: [], lastCost: null, loading: !!itemId };
+  render();
+  if (itemId) await reloadPriceHistory();
+}
+async function reloadPriceHistory() {
+  const ph = state.ph; if (!ph) return;
+  if (!ph.itemId) { ph.rows = []; ph.loading = false; render(); return; }
+  ph.loading = true; render();
+  const [rows, last] = await Promise.all([
+    loadItemSaleHistory(ph.itemId, { from: ph.from, to: ph.to }),
+    isAdmin() ? loadLastPurchasePrices(ph.itemId, 1) : Promise.resolve([]),
+  ]);
+  if (state.ph !== ph) return;
+  ph.rows = rows; ph.lastCost = last[0] || null; ph.loading = false;
+  render();
+}
+function priceHistoryVisibleRows() {
+  const ph = state.ph; if (!ph) return [];
+  return ph.tab === 'customer' && ph.customerId ? ph.rows.filter(r => r.customerId === ph.customerId) : ph.rows;
+}
+function fillSalesPriceFromHistory(priceBeforeTax) {
+  const el = document.getElementById('si-item-price');
+  if (!el) return;
+  const taxPct = Number(document.getElementById('si-item-tax')?.value) || 0;
+  const v = (state.salesForm?.price_mode === 'شامل الضريبة' && taxPct > 0) ? priceBeforeTax * (1 + taxPct / 100) : priceBeforeTax;
+  el.value = String(Math.round(v * 100) / 100);
+  el.focus(); el.select();
+}
+function renderPriceHistoryModal() {
+  const ph = state.ph;
+  const it = state.items.find(x => x.id === ph.itemId);
+  const rows = priceHistoryVisibleRows();
+  const prices = rows.map(r => r.price);
+  const totalQty = rows.reduce((s, r) => s + r.qty, 0);
+  const avg = totalQty > 0 ? rows.reduce((s, r) => s + r.price * r.qty, 0) / totalQty : 0;
+  const cust = ph.customerId ? state.parties.find(p => p.id === ph.customerId) : null;
+  const customers = state.parties.filter(p => p.party_type === 'customer');
+  const box = (label, val, color) => `<div style="flex:1;min-width:100px;border:1px solid #DEDACB;border-radius:8px;padding:8px 10px;background:#FAF9F4;"><div style="font-size:10.5px;color:#6E6D5F;">${label}</div><div class="mono" style="font-size:15px;font-weight:700;color:${color || '#1B3352'};">${val}</div></div>`;
+  const th = h => `<th style="padding:9px 10px;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;font-size:11px;font-weight:500;text-align:right;white-space:nowrap;">${h}</th>`;
+  const tab = (key, label, disabled) => `<button type="button" data-ph-tab="${key}" ${disabled ? 'disabled' : ''} style="padding:7px 14px;border:none;border-bottom:3px solid ${ph.tab === key ? '#6C3FA8' : 'transparent'};background:none;font-size:12.5px;font-weight:${ph.tab === key ? '700' : '400'};color:${disabled ? '#B9B6A8' : ph.tab === key ? '#6C3FA8' : '#5F5E5A'};cursor:${disabled ? 'not-allowed' : 'pointer'};">${label}</button>`;
+  const canFill = ph.mode === 'sales';
+  return `
+  <div id="ph-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;padding:16px;z-index:60;">
+    <div class="print-area" style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:820px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+      <div class="win-title"><span><i class="ti ti-history"></i> سجل أسعار بيع الصنف</span><button id="ph-close" class="no-print" style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
+      <div style="padding:14px 16px 0;">
+        <div class="no-print" style="display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-bottom:12px;">
+          <div style="flex:2;min-width:220px;">${partyField('الصنف', `<input id="ph-item" class="input" list="ph-item-list" placeholder="اكتب رقم الصنف أو اسمه..." value="${escapeHtml(it ? `${it.sku || ''} — ${it.name}` : ph.itemQuery)}" /><datalist id="ph-item-list">${state.items.map(x => `<option value="${escapeHtml(`${x.sku || ''} — ${x.name}`)}"></option>`).join('')}</datalist>`)}</div>
+          ${ph.mode === 'report' ? `<div style="flex:1;min-width:150px;">${partyField('العميل', `<select id="ph-customer" class="input"><option value="">كل العملاء</option>${customers.map(c => `<option value="${c.id}" ${c.id === ph.customerId ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select>`)}</div>` : ''}
+          <div>${partyField('من', `<input id="ph-from" type="date" class="input" value="${escapeHtml(ph.from)}" />`)}</div>
+          <div>${partyField('إلى', `<input id="ph-to" type="date" class="input" value="${escapeHtml(ph.to)}" />`)}</div>
+          <button id="ph-apply" class="btn primary" style="padding:8px 14px;">عرض</button>
+          <button id="ph-excel" class="btn" style="padding:8px 14px;" ${rows.length ? '' : 'disabled'}>Excel</button>
+          <button id="ph-print" class="btn" style="padding:8px 14px;" ${rows.length ? '' : 'disabled'}>طباعة</button>
+        </div>
+        <div class="print-only" style="${printStyleVars()}"><div style="text-align:center;font-weight:700;font-size:14px;margin:8px 0;">${escapeHtml(state.company?.name_ar || '')} — أسعار بيع: ${escapeHtml(it ? `${it.name} (${it.sku || ''})` : '')}${cust ? ` — العميل: ${escapeHtml(cust.name)}` : ''}${ph.from || ph.to ? ` — الفترة ${escapeHtml(ph.from || '…')} إلى ${escapeHtml(ph.to || '…')}` : ''}</div></div>
+        ${it ? `
+        ${ph.mode === 'sales' ? `<div class="no-print" style="display:flex;border-bottom:1px solid #DEDACB;margin-bottom:12px;">${tab('customer', `مبيعات هذا العميل${cust ? ` (${escapeHtml(cust.name)})` : ''}`, !ph.customerId)}${tab('all', 'كل المبيعات')}</div>` : ''}
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+          ${box('آخر سعر', rows.length ? fmt(rows[0].price) : '—', '#6C3FA8')}
+          ${box('أعلى سعر', prices.length ? fmt(Math.max(...prices)) : '—', '#0F6E56')}
+          ${box('أقل سعر', prices.length ? fmt(Math.min(...prices)) : '—', '#C0392B')}
+          ${box('متوسط السعر', prices.length ? fmt(avg) : '—')}
+          ${box('الكمية المباعة', totalQty || '—')}
+          ${isAdmin() ? box('آخر تكلفة شراء', ph.lastCost ? fmt(ph.lastCost.price) : fmt(it.cost), '#BA7517') : ''}
+        </div>` : ''}
+      </div>
+      <div style="padding:0 16px 14px;">
+        ${!it ? `<div style="padding:30px;text-align:center;color:#6E6D5F;font-size:12.5px;">اختر الصنف من الخانة فوق</div>`
+        : ph.loading ? `<div style="padding:30px;text-align:center;color:#6E6D5F;font-size:12.5px;">جاري التحميل...</div>`
+        : `<div class="print-scroll" style="border:1px solid #E4E2DA;border-radius:10px;overflow:hidden;overflow-x:auto;">
+          <table style="width:100%;border-collapse:collapse;">
+            <thead><tr>${['التاريخ', 'رقم الفاتورة', ...(ph.tab === 'customer' && ph.mode === 'sales' ? [] : ['العميل']), 'الكمية', 'السعر (قبل الضريبة)', 'الإجمالي'].map(th).join('')}</tr></thead>
+            <tbody>
+              ${rows.map((r, i) => { const bg = i % 2 ? '#F4F1EA' : '#FFFDF6'; const td = (v, extra = '') => `<td style="padding:8px 10px;background:${bg};font-size:11.5px;border-bottom:1px solid #E4E2DA;white-space:nowrap;${extra}">${v}</td>`; return `
+              <tr ${canFill ? `data-ph-fill="${r.price}" style="cursor:pointer;" title="اضغط لاستخدام هذا السعر بالفاتورة"` : ''}>
+                ${td(escapeHtml(r.date), 'font-family:monospace;')}${td(escapeHtml(r.invoiceNumber), 'font-family:monospace;')}
+                ${ph.tab === 'customer' && ph.mode === 'sales' ? '' : td(escapeHtml(r.customerName), 'white-space:normal;')}
+                ${td(r.qty, 'font-family:monospace;')}${td(fmt(r.price), 'font-family:monospace;font-weight:700;color:#6C3FA8;')}${td(fmt(r.price * r.qty), 'font-family:monospace;')}
+              </tr>`; }).join('') || `<tr><td colspan="6" style="padding:20px;text-align:center;font-size:12px;color:#6E6D5F;">${ph.tab === 'customer' && ph.mode === 'sales' ? 'ما سبق بعت هذا الصنف لهذا العميل' : 'ما فيه مبيعات معتمدة لهذا الصنف بالفترة المحددة'}</td></tr>`}
+            </tbody>
+          </table>
+        </div>
+        ${canFill && rows.length ? '<div class="no-print" style="font-size:11px;color:#6E6D5F;margin-top:6px;"><i class="ti ti-hand-click"></i> اضغط على أي سطر وسعره ينتقل للفاتورة.</div>' : ''}`}
+      </div>
+    </div>
+  </div>`;
+}
+installPriceHistoryDelegation && setTimeout(() => installPriceHistoryDelegation(), 0);
+// كل أحداث البار وسجل الأسعار بمكان واحد (تفويض على مستوى الصفحة — يشتغل بعد أي render)
+function installPriceHistoryDelegation() {
+  if (window.__phDelegated) return; window.__phDelegated = true;
+  const pickItemFromInput = (val) => {
+    const v = String(val || '').trim(); if (!v) return null;
+    const sku = v.split(' — ')[0].trim().toLowerCase();
+    return state.items.find(x => `${x.sku || ''} — ${x.name}` === v)
+      || state.items.find(x => (x.sku || '').toLowerCase() === sku || (x.barcode || '').toLowerCase() === sku || ((state.itemAltNumbersMap || {})[x.id] || []).some(a => a.toLowerCase() === sku))
+      || null;
+  };
+  document.addEventListener('click', async (ev) => {
+    const t = ev.target;
+    const copyBtn = t.closest('[data-bar-copy]');
+    if (copyBtn) { const v = copyBtn.dataset.barCopy; try { await navigator.clipboard.writeText(v); showToast(`تم نسخ ${v}`); } catch (e) { showToast(v); } return; }
+    const altBtn = t.closest('[data-bar-alt-item]');
+    if (altBtn) {
+      const id = altBtn.dataset.barAltItem;
+      const sel = document.getElementById('si-item-select') || document.getElementById('qt-item-select') || document.getElementById('pi-item-select');
+      if (sel && [...sel.options].some(o => o.value === id)) { sel.value = id; sel.dispatchEvent(new Event('change')); }
+      else { state.activeBarItemId = id; refreshActiveItemBar(); }
+      return;
+    }
+    const histBtn = t.closest('[data-bar-history]');
+    if (histBtn) { openPriceHistory(histBtn.dataset.barHistory, 'sales'); return; }
+    if (t.closest('#active-item-bar-close')) { state.activeBarItemId = null; refreshActiveItemBar(); return; }
+    if (!state.ph) return;
+    if (t.closest('#ph-close') || t.id === 'ph-overlay') { state.ph = null; render(); return; }
+    const tabBtn = t.closest('[data-ph-tab]');
+    if (tabBtn && !tabBtn.disabled) { state.ph.tab = tabBtn.dataset.phTab; render(); return; }
+    const fillRow = t.closest('[data-ph-fill]');
+    if (fillRow) { const price = Number(fillRow.dataset.phFill); state.ph = null; render(); fillSalesPriceFromHistory(price); showToast(`تم وضع السعر ${fmt(price)}`); return; }
+    if (t.closest('#ph-apply')) {
+      const ph = state.ph;
+      const picked = pickItemFromInput(document.getElementById('ph-item')?.value);
+      if (!picked) { showToast('اختر الصنف من القائمة', 'error'); return; }
+      ph.itemId = picked.id;
+      ph.from = document.getElementById('ph-from')?.value || '';
+      ph.to = document.getElementById('ph-to')?.value || '';
+      if (document.getElementById('ph-customer')) ph.customerId = document.getElementById('ph-customer').value;
+      await reloadPriceHistory();
+      return;
+    }
+    if (t.closest('#ph-print')) { window.print(); return; }
+    if (t.closest('#ph-excel')) {
+      const ph = state.ph; const it = state.items.find(x => x.id === ph.itemId);
+      const rows = priceHistoryVisibleRows();
+      exportFormattedAccountingSheet(`أسعار بيع ${it?.sku || ''}.xlsx`, 'أسعار البيع',
+        ['التاريخ', 'رقم الفاتورة', 'العميل', 'رقم الصنف', 'اسم الصنف', 'الكمية', 'السعر قبل الضريبة', 'الإجمالي'],
+        rows.map(r => [r.date, r.invoiceNumber, r.customerName, it?.sku || '', it?.name || '', r.qty, r.price, Math.round(r.price * r.qty * 100) / 100]));
+      return;
+    }
+  });
+  document.addEventListener('change', (ev) => {
+    if (!state.ph) return;
+    if (ev.target.id === 'ph-item' || ev.target.id === 'ph-customer') document.getElementById('ph-apply')?.click();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && state.ph) { state.ph = null; render(); return; }
+    if (ev.key === 'F3' && state.activeSection === 'المبيعات' && !state.ph) {
+      const id = document.getElementById('si-item-select')?.value || state.activeBarItemId;
+      if (id) { ev.preventDefault(); openPriceHistory(id, 'sales'); }
+    }
+  });
 }
 
 function calcBulkNewPrice(oldPrice, mode, value) {
@@ -10371,7 +10581,7 @@ function wireItemPickBehavior(selectId, infoId, qtyId, priceId, priceKey) {
         info.style.display = 'block';
         info.innerHTML = `<b>${escapeHtml(item.name)}</b> — <span class="mono">${escapeHtml(item.sku)}</span>`
           + ` &nbsp;·&nbsp; الرصيد الحالي: <span class="mono">${item.qty}</span>`
-          + ` &nbsp;·&nbsp; التكلفة: <span class="mono">${fmt(item.cost)}</span>`
+          + (isAdmin() ? ` &nbsp;·&nbsp; التكلفة: <span class="mono">${fmt(item.cost)}</span>` : '')
           + ` &nbsp;·&nbsp; سعر البيع: <span class="mono">${fmt(item.price)}</span>`;
       }
       const priceEl = priceId ? document.getElementById(priceId) : null;
@@ -10388,10 +10598,7 @@ function wireItemPickBehavior(selectId, infoId, qtyId, priceId, priceKey) {
     }
   };
 }
-function bindActiveItemBar() {
-  const btn = document.getElementById('active-item-bar-close');
-  if (btn) btn.onclick = () => { state.activeBarItemId = null; const bar = document.getElementById('active-item-bar'); if (bar) bar.remove(); };
-}
+function bindActiveItemBar() { installPriceHistoryDelegation(); }
 
 // ---------- DESIGNER PANEL (كلمة سر مشفّرة SHA-256 - النص الأصلي غير مخزّن بالكود) ----------
 const DESIGNER_PASSWORD_HASH = 'f8571f75f919f47d31dbbdc4e725ac0abb2908bf276eea8556f5b0b7c0f2847e';
@@ -13319,6 +13526,7 @@ function bindAppEvents() {
       state.openDropdown = null;
       const target = btn.dataset.submenuTarget || btn.dataset.submenu;
       if (target === '__report_sales_invoices__') { openInvStmt('sales'); return; }
+      if (target === '__item_sale_prices__') { if (!state.parties?.length) await loadParties(); openPriceHistory('', 'report'); return; }
       if (target === '__sys_features__' || target === '__account_mapping__') {
         if (!isDesigner()) { showToast('هذا القسم لمدير النظام (المصمم) فقط'); return; }
         await loadCompany(); await loadChartOfAccounts();
@@ -14813,16 +15021,20 @@ function bindAppEvents() {
         const itemId = ev.target.value;
         if (!itemId) { if (box) box.style.display = 'none'; return; }
         if (box) { box.style.display = 'block'; box.innerHTML = 'جاري تحميل آخر الأسعار...'; }
-        const prices = await loadLastSalePrices(itemId, 5);
+        const hist = await loadItemSaleHistory(itemId, { limit: 200 });
         if (!document.getElementById('si-item-select') || document.getElementById('si-item-select').value !== itemId) return;
         if (!box) return;
-        if (prices.length === 0) { box.innerHTML = 'ما فيه مبيعات سابقة لهذا الصنف'; return; }
-        box.innerHTML = '<b>آخر أسعار البيع:</b> ' + prices.map(p => `<button type="button" data-fill-price="${p.price}" style="margin:2px 3px;padding:3px 8px;border:1px solid #2C4A6E;border-radius:12px;background:#fff;color:#2C4A6E;font-size:11px;cursor:pointer;" class="mono" title="${escapeHtml(p.invoiceNumber)} — ${escapeHtml(p.date)}">${fmt(p.price)}</button>`).join('');
+        const histBtn = `<button type="button" data-bar-history="${itemId}" style="margin-right:6px;padding:3px 10px;border:1px solid #6C3FA8;border-radius:12px;background:#F4EEFB;color:#6C3FA8;font-size:11px;cursor:pointer;"><i class="ti ti-history"></i> السجل الكامل (F3)</button>`;
+        if (hist.length === 0) { box.innerHTML = 'ما فيه مبيعات سابقة لهذا الصنف'; return; }
+        const custId = state.salesForm.customer_id;
+        const custLast = custId ? hist.find(r => r.customerId === custId) : null;
+        const seen = new Set(); const recent = [];
+        for (const r of hist) { if (recent.length >= 5) break; recent.push(r); seen.add(r.price); }
+        box.innerHTML = (custLast ? `<div style="margin-bottom:3px;"><b style="color:#6C3FA8;">آخر سعر لهذا العميل:</b> <button type="button" data-fill-price="${custLast.price}" class="mono" style="padding:2px 9px;border:1px solid #6C3FA8;border-radius:12px;background:#6C3FA8;color:#fff;font-size:11.5px;font-weight:700;cursor:pointer;">${fmt(custLast.price)}</button> <span class="mono" style="color:#6E6D5F;">${escapeHtml(custLast.date)} — فاتورة ${escapeHtml(custLast.invoiceNumber)}</span></div>`
+            : (custId ? '<div style="margin-bottom:3px;color:#6E6D5F;">ما سبق بعت هذا الصنف لهذا العميل</div>' : ''))
+          + '<b>آخر أسعار البيع:</b> ' + recent.map(p => `<button type="button" data-fill-price="${p.price}" style="margin:2px 3px;padding:3px 8px;border:1px solid #2C4A6E;border-radius:12px;background:#fff;color:#2C4A6E;font-size:11px;cursor:pointer;" class="mono" title="${escapeHtml(p.customerName)} — فاتورة ${escapeHtml(p.invoiceNumber)} — ${escapeHtml(p.date)}">${fmt(p.price)} <span style="opacity:0.6;font-size:10px;">${escapeHtml(p.date.slice(5))}</span></button>`).join('') + histBtn;
         box.querySelectorAll('[data-fill-price]').forEach(btn => {
-          btn.onclick = () => {
-            const priceEl = document.getElementById('si-item-price');
-            if (priceEl) priceEl.value = btn.dataset.fillPrice;
-          };
+          btn.onclick = () => fillSalesPriceFromHistory(Number(btn.dataset.fillPrice));
         });
       });
     }
