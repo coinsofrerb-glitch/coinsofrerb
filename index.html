@@ -1155,12 +1155,18 @@ async function loadItemRelations(itemId) {
 // ---------- PARTIES (العملاء والموردين) ----------
 async function loadParties() {
   const { data, error } = await fetchAllQ(() => sb.from('parties').select('*').order('created_at', { ascending: false }).order('id'));
-  if (!error) state.parties = data || [];
+  if (error) return;
+  if (!state.branchesTried) await loadBranches();
+  state.partiesAll = data || [];
+  // كل فرع قائم بذاته: موظف الفرع يشوف عملاء وموردي فرعه فقط
+  const ub = userBranchId();
+  state.parties = ub ? state.partiesAll.filter(p => p.branch_id === ub) : state.partiesAll;
 }
+function branchFilterDocs(list) { const ub = userBranchId(); return ub ? list.filter(x => !x.branch_id || x.branch_id === ub) : list; }
 
 function filteredParties() {
   const q = state.partyQuery.trim().toLowerCase();
-  return state.parties.filter(p => p.party_type === state.partyTypeFilter && (
+  return state.parties.filter(p => p.party_type === state.partyTypeFilter && (!state.partyBranchFilter || p.branch_id === state.partyBranchFilter) && (
     !q || (p.name||'').toLowerCase().includes(q) || (p.code||'').toLowerCase().includes(q) || (p.phone||'').includes(q)
   ));
 }
@@ -1186,7 +1192,7 @@ async function loadPurchases() {
 
 function filteredPurchases() {
   const q = state.purchaseQuery.trim().toLowerCase();
-  let list = state.purchases;
+  let list = branchFilterDocs(state.purchases);
   if (q) list = list.filter(p => (p.invoice_number||'').toLowerCase().includes(q) || (p.parties?.name||'').toLowerCase().includes(q));
   if (state.purchaseFilterSupplierId) list = list.filter(p => p.supplier_id === state.purchaseFilterSupplierId);
   if (state.purchaseFilterType && state.purchaseFilterType !== 'الكل') list = list.filter(p => p.invoice_type === state.purchaseFilterType);
@@ -1529,7 +1535,7 @@ async function loadQuotations() {
 }
 function filteredQuotations() {
   const q = state.quotationQuery.trim().toLowerCase();
-  let list = state.quotations;
+  let list = branchFilterDocs(state.quotations);
   if (q) list = list.filter(x => (x.quote_number||'').toLowerCase().includes(q) || (x.parties?.name||x.walkin_customer_name||'').toLowerCase().includes(q) || (x.walkin_customer_mobile||'').includes(q));
   if (state.quoteFilterCustomerId) list = list.filter(x => x.customer_id === state.quoteFilterCustomerId);
   const extractNum = (s) => { const m = (s||'').match(/(\d+)\s*$/); return m ? parseInt(m[1], 10) : null; };
@@ -1610,7 +1616,7 @@ async function loadSalesReturns() {
 }
 function filteredSalesReturns() {
   const q = state.salesReturnQuery.trim().toLowerCase();
-  let list = state.salesReturns;
+  let list = branchFilterDocs(state.salesReturns);
   if (q) list = list.filter(x => (x.return_number||'').toLowerCase().includes(q) || (x.parties?.name||'').toLowerCase().includes(q));
   if (state.srFilterCustomerId) list = list.filter(x => x.customer_id === state.srFilterCustomerId);
   const extractNum = (s) => { const m = (s||'').match(/(\d+)\s*$/); return m ? parseInt(m[1], 10) : null; };
@@ -1644,7 +1650,7 @@ async function loadPurchaseReturns() {
 }
 function filteredPurchaseReturns() {
   const q = state.purchaseReturnQuery.trim().toLowerCase();
-  let list = state.purchaseReturns;
+  let list = branchFilterDocs(state.purchaseReturns);
   if (q) list = list.filter(x => (x.return_number||'').toLowerCase().includes(q) || (x.parties?.name||'').toLowerCase().includes(q));
   if (state.prFilterSupplierId) list = list.filter(x => x.supplier_id === state.prFilterSupplierId);
   const extractNum = (s) => { const m = (s||'').match(/(\d+)\s*$/); return m ? parseInt(m[1], 10) : null; };
@@ -2019,6 +2025,7 @@ async function loadBranches() {
   const { data, error } = await sb.from('branches').select('*').order('is_main', { ascending: false }).order('name');
   state.branches = error ? [] : (data || []);
   state.branchesReady = !error;
+  state.branchesTried = true;
 }
 function userBranchId() { return (state.profile && state.profile.branch_id && state.branchesReady) ? state.profile.branch_id : null; }
 function isBranchUser() { return !!userBranchId(); }
@@ -2683,6 +2690,7 @@ function renderPartiesSection() {
           <div style="flex:1;min-width:220px;">
             <input id="party-search" class="input" placeholder="${t('party_search_ph')}" value="${escapeHtml(state.partyQuery)}" />
           </div>
+          ${state.branchesReady && state.branches.length > 1 && !userBranchId() ? `<select id="party-branch-filter" class="input" style="max-width:180px;"><option value="">كل الفروع</option>${state.branches.map(b => `<option value="${b.id}" ${state.partyBranchFilter === b.id ? 'selected' : ''}>${escapeHtml(b.name)}</option>`).join('')}</select>` : ''}
           ${hasPerm('parties','can_add') ? `<button id="new-party-btn" class="btn primary" style="padding:8px 14px;">+ ${typeLabel(state.partyTypeFilter)} ${t('party_new')}</button>` : ''}
         </div>
         <div style="font-size:12px;color:#5F5E5A;margin-bottom:8px;">${list.length} ${typeLabel(state.partyTypeFilter)}</div>
@@ -2692,7 +2700,7 @@ function renderPartiesSection() {
           </div>
           ${list.map((p, i) => { const tier = state.partyTypeFilter === 'customer' ? customerTier(state.customerTotalPurchases?.[p.id] || 0) : null; return `
             <div style="display:grid;grid-template-columns:1.2fr 0.8fr 0.9fr 1fr 0.8fr 0.7fr 0.6fr 0.6fr;background:${i % 2 ? '#F4F1EA' : '#FFFDF6'};font-size:12.5px;align-items:center;min-width:820px;">
-              <div style="padding:7px 8px;">${escapeHtml(p.name)}${!p.active ? ` <span style="color:#C0392B;">${t('party_inactive')}</span>` : ''}</div>
+              <div style="padding:7px 8px;">${escapeHtml(p.name)}${!p.active ? ` <span style="color:#C0392B;">${t('party_inactive')}</span>` : ''}${state.branches?.length > 1 && !userBranchId() && p.branch_id ? `<div style="font-size:10.5px;color:#6E6D5F;"><i class="ti ti-building-store"></i> ${escapeHtml(branchName(p.branch_id))}</div>` : ''}</div>
               <div style="padding:7px 8px;" class="mono">${escapeHtml(p.code || '—')}</div>
               <div style="padding:7px 8px;" class="mono">${escapeHtml(p.phone || '—')}</div>
               <div style="padding:7px 8px;">${escapeHtml(p.address || '—')}</div>
@@ -2769,6 +2777,7 @@ function renderPartyFormModal() {
           <label><input type="radio" name="p-active" value="true" ${f.active?'checked':''} /> فعال</label>
           <label><input type="radio" name="p-active" value="false" ${!f.active?'checked':''} /> موقوف</label>
         </div>
+        ${state.branchesReady && state.branches.length > 1 && !userBranchId() ? `<div style="grid-column:1/-1;">${partyField('الفرع', `<select id="p-branch" class="input">${state.branches.map(b => `<option value="${b.id}" ${(f.branch_id || mainBranchId()) === b.id ? 'selected' : ''}>${escapeHtml(b.name)}</option>`).join('')}</select>`)}</div>` : ''}
       </div>
 
       <div class="no-print" style="display:flex;gap:2px;padding:10px 16px 0;border-bottom:1px solid #A9A48C;flex-wrap:wrap;margin-top:8px;">
@@ -2911,6 +2920,16 @@ function renderQuotationsSection() {
 // ---------- قالب طباعة موحّد احترافي (نفس تصميم فاتورة البيع) — يُستخدم لعروض الأسعار وفواتير الشراء ----------
 // cfg: { titleAr, titleEn, badges:[{text,color}], docTitle:[ar,en], docRows:[[ar,en,val,mono]], partyTitle:[ar,en], partyRows:[...],
 //        lines:[{sku,name,unit,qty,price,disc,tax}], showDisc, totals:[[ar,en,val,kind]], words, payments, notesHtml, qrId, signatures:[..], footerType }
+// سطر الفرع بالطباعة: اسم الفرع + عنوانه + جواله (يظهر فقط لما يكون عند المحل أكثر من فرع)
+function printBranchFor(whId) {
+  if (!state.branchesReady || (state.branches || []).length < 2) return null;
+  const bid = (whId && warehouseBranchId(whId)) || userBranchId() || mainBranchId();
+  return (state.branches || []).find(b => b.id === bid) || null;
+}
+function printBranchLine(whId) {
+  const b = printBranchFor(whId); if (!b) return '';
+  return [b.name, b.address, b.phone ? 'جوال: ' + b.phone : ''].filter(Boolean).join(' — ');
+}
 function renderProPrintDoc(cfg) {
   const c = state.company || {};
   const main = c.print_table_header_bg || '#1B3352';
@@ -2949,7 +2968,7 @@ function renderProPrintDoc(cfg) {
       <div class="pp-head">
         <div class="ar">
           <div class="nm">${escapeHtml(c.name_ar || 'اسم الشركة')}</div>
-          <div class="sub">${[c.tagline_ar, c.address, c.commercial_register ? 'س.ت: ' + c.commercial_register : '', c.tax_number ? 'الرقم الضريبي: ' + c.tax_number : ''].filter(Boolean).map(escapeHtml).join('<br>')}</div>
+          <div class="sub">${[c.tagline_ar, printBranchLine(cfg.warehouseId) || c.address, c.commercial_register ? 'س.ت: ' + c.commercial_register : '', c.tax_number ? 'الرقم الضريبي: ' + c.tax_number : ''].filter(Boolean).map(escapeHtml).join('<br>')}</div>
         </div>
         <div>${c.logo_url && c.print_show_logo !== false ? `<img data-print-logo src="${escapeHtml(c.logo_url)}" style="max-height:70px;max-width:150px;" />` : ''}</div>
         <div class="en">
@@ -3346,7 +3365,7 @@ function renderPurchaseFormModal() {
         const wh = (state.warehouses||[]).find(w => w.id === f.warehouse_id);
         const cur = tot.isForeign ? f.currency : '';
         return {
-          titleAr: 'فاتورة مشتريات', titleEn: 'Purchase Invoice', noVat: f.no_tax || !taxOn(),
+          warehouseId: f.warehouse_id, titleAr: 'فاتورة مشتريات', titleEn: 'Purchase Invoice', noVat: f.no_tax || !taxOn(),
           badges: [!f.approved ? { text: 'مسودة', color: '#C0392B' } : null, { text: (f.invoice_type||'') + (f.invoice_type === 'آجل' ? ' Credit' : ' Cash') }],
           docTitle: ['بيانات الفاتورة', 'Invoice Details'],
           docRows: [['رقم الفاتورة','Invoice No', f.invoice_number, true], ['تاريخ الفاتورة','Invoice Date', f.invoice_date, true], ['رقم فاتورة المورد','Supplier Inv No', f.supplier_ref, true], ['رقم الطلبية','PO No', f.order_number, true], ['المستودع','Warehouse', wh?.name], ['العملة','Currency', tot.isForeign ? `${f.currency} (سعر الصرف ${f.exchange_rate})` : ''], ['طريقة الدفع','Payment', f.invoice_type === 'آجل' && !(Number(f.paid_amount) > 0) ? 'آجل' : f.payment_method]],
@@ -5304,7 +5323,7 @@ function renderSalesFormModal() {
           <div class="pi-head">
             <div class="ar">
               <div class="nm">${escapeHtml(c.name_ar || 'اسم الشركة')}</div>
-              <div class="sub">${[c.tagline_ar, c.address, c.commercial_register ? 'س.ت: ' + c.commercial_register : '', c.tax_number ? 'الرقم الضريبي: ' + c.tax_number : ''].filter(Boolean).map(escapeHtml).join('<br>')}</div>
+              <div class="sub">${[c.tagline_ar, printBranchLine(f.warehouse_id) || c.address, c.commercial_register ? 'س.ت: ' + c.commercial_register : '', c.tax_number ? 'الرقم الضريبي: ' + c.tax_number : ''].filter(Boolean).map(escapeHtml).join('<br>')}</div>
             </div>
             <div>${c.logo_url && c.print_show_logo !== false ? `<img data-print-logo src="${escapeHtml(c.logo_url)}" style="max-height:70px;max-width:150px;" />` : ''}</div>
             <div class="en">
@@ -5823,7 +5842,7 @@ function renderSalesReturnFormModal() {
       ${renderProPrintDoc((() => {
         const p = f.customer_id ? customers.find(x => x.id === f.customer_id) : null;
         return {
-          titleAr: 'سند مردود مبيعات', titleEn: 'Sales Return', noVat: !taxOn(),
+          warehouseId: f.warehouse_id, titleAr: 'سند مردود مبيعات', titleEn: 'Sales Return', noVat: !taxOn(),
           badges: [!f.approved ? { text: 'مسودة', color: '#C0392B' } : null],
           docTitle: ['بيانات السند', 'Document Details'],
           docRows: [['رقم السند','Return No', f.return_number, true], ['التاريخ','Date', f.return_date, true], ['الفاتورة الأصلية','Original Invoice', f.source_invoice_number || f.sourceInvoiceNumber, true], ['طريقة الرد','Refund', f.payment_method || 'خصم من الرصيد']],
@@ -6019,7 +6038,7 @@ function renderPurchaseReturnFormModal() {
       ${renderProPrintDoc((() => {
         const p = f.supplier_id ? suppliers.find(x => x.id === f.supplier_id) : null;
         return {
-          titleAr: 'سند مردود مشتريات', titleEn: 'Purchase Return', noVat: !taxOn(),
+          warehouseId: f.warehouse_id, titleAr: 'سند مردود مشتريات', titleEn: 'Purchase Return', noVat: !taxOn(),
           badges: [!f.approved ? { text: 'مسودة', color: '#C0392B' } : null],
           docTitle: ['بيانات السند', 'Document Details'],
           docRows: [['رقم السند','Return No', f.return_number, true], ['التاريخ','Date', f.return_date, true], ['الفاتورة الأصلية','Original Invoice', f.source_invoice_number || f.sourceInvoiceNumber, true], ['طريقة الرد','Refund', f.payment_method || 'خصم من الرصيد']],
@@ -6290,7 +6309,7 @@ function renderWarehousesSection() {
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             ${state.branches.map(b => `<button type="button" data-open-branch="${b.id}" style="border:1px solid ${b.active ? '#B9C7DC' : '#E4C9A0'};background:#fff;border-radius:10px;padding:7px 12px;cursor:pointer;font-family:inherit;text-align:right;">
               <div style="font-size:12.5px;font-weight:600;color:#1B3352;">${escapeHtml(b.name)} ${b.is_main ? '⭐' : ''} ${b.code ? `<span class="mono" style="font-weight:400;color:#6E6D5F;">(${escapeHtml(b.code)})</span>` : ''}</div>
-              <div style="font-size:11px;color:#6E6D5F;">${state.warehouses.filter(w => w.branch_id === b.id).length} مستودع · ${(state.users || []).filter(u => u.branch_id === b.id).length} موظف${b.active ? '' : ' · موقوف'}</div>
+              <div style="font-size:11px;color:#6E6D5F;">${state.warehouses.filter(w => w.branch_id === b.id).length} مستودع · ${(state.users || []).filter(u => u.branch_id === b.id).length} موظف${b.doc_prefix ? ` · الترقيم ${escapeHtml(b.doc_prefix)}0001` : ''}${b.active ? '' : ' · موقوف'}</div>
             </button>`).join('')}
           </div>
         </div>` : ''}
@@ -6326,6 +6345,8 @@ function renderBranchFormModal() {
           ${partyField('الرمز', `<input id="br-code" class="input" dir="ltr" value="${escapeHtml(f.code||'')}" placeholder="J" />`)}
           ${partyField('الجوال', `<input id="br-phone" class="input" dir="ltr" value="${escapeHtml(f.phone||'')}" />`)}
         </div>
+        ${f.is_main ? `<div style="font-size:11.5px;color:#5F5E5A;background:#F6F8FB;border-radius:8px;padding:7px 10px;">الفرع الرئيسي يكمل ترقيم الفواتير كما هو (1، 2، 3…)</div>`
+          : partyField('رقم الفرع (للترقيم)', `<input id="br-prefix" class="input mono" dir="ltr" style="max-width:90px;" value="${escapeHtml(f.doc_prefix||'')}" placeholder="تلقائي" /> <span style="font-size:11px;color:#6E6D5F;">فواتير الفرع تبدأ بـ <b class="mono">${escapeHtml(f.doc_prefix || 'N')}0001</b></span>`)}
         ${partyField('العنوان', `<input id="br-address" class="input" value="${escapeHtml(f.address||'')}" />`)}
         <label style="font-size:12.5px;"><input id="br-active" type="checkbox" ${f.active!==false?'checked':''} ${f.is_main?'disabled':''} /> نشط</label>
         ${!state.editingBranchId ? `<label style="font-size:12.5px;background:#F6F8FB;border-radius:8px;padding:8px 10px;"><input id="br-create-wh" type="checkbox" checked /> إنشاء مستودع للفرع تلقائياً بنفس الاسم</label>` : ''}
@@ -7645,7 +7666,7 @@ function renderItemMovementModal() {
 
 function renderReceiptVouchersSection() {
   const q = (state.receiptVoucherQuery||'').trim().toLowerCase();
-  const list = !q ? state.receiptVouchers : state.receiptVouchers.filter(p => (p.voucher_number||'').toLowerCase().includes(q) || (p.parties?.name||'').toLowerCase().includes(q));
+  const list = !q ? branchFilterDocs(state.receiptVouchers) : branchFilterDocs(state.receiptVouchers).filter(p => (p.voucher_number||'').toLowerCase().includes(q) || (p.parties?.name||'').toLowerCase().includes(q));
   return `
       <div class="panel">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
@@ -7690,7 +7711,7 @@ function renderSettlementVouchersSection() {
 
 function renderPaymentVouchersSection() {
   const q = (state.paymentVoucherQuery||'').trim().toLowerCase();
-  const list = !q ? state.paymentVouchers : state.paymentVouchers.filter(p => (p.voucher_number||'').toLowerCase().includes(q) || (p.parties?.name||'').toLowerCase().includes(q));
+  const list = !q ? branchFilterDocs(state.paymentVouchers) : branchFilterDocs(state.paymentVouchers).filter(p => (p.voucher_number||'').toLowerCase().includes(q) || (p.parties?.name||'').toLowerCase().includes(q));
   return `
       <div class="panel">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
@@ -13057,9 +13078,21 @@ function cashOrBankAccount(paymentMethod) {
   return (paymentMethod||'').includes('بنك') || (paymentMethod||'').includes('تحويل') ? acc('bank') : acc('cash');
 }
 
+function mainBranchId() { return (state.branches || []).find(b => b.is_main)?.id || null; }
 function nextDocNumber(list, field, prefix, pad) {
-  const maxNum = list.reduce((max, p) => { const m = (p[field]||'').match(/(\d+)$/); return m ? Math.max(max, parseInt(m[1], 10)) : max; }, 0);
-  return String(maxNum + 1); // ترقيم بالأرقام فقط (بدون حروف) — يكمل من آخر رقم حتى لو القديم فيه حروف
+  // ترقيم بالأرقام فقط. الفرع الرئيسي يكمل ترقيمه، وباقي الفروع: رقم الفرع + تسلسل 4 خانات (20001، 20002…)
+  const mainId = mainBranchId();
+  const target = userBranchId() || mainId;
+  const br = (state.branches || []).find(b => b.id === target);
+  let docs = list;
+  if (state.branchesReady && target) docs = list.filter(p => p.branch_id ? p.branch_id === target : target === mainId);
+  if (br && !br.is_main && br.doc_prefix) {
+    const re = new RegExp('^' + br.doc_prefix + '(\\d{4,})$');
+    const maxSeq = docs.reduce((max, p) => { const m = String(p[field] || '').match(re); return m ? Math.max(max, parseInt(m[1], 10)) : max; }, 0);
+    return br.doc_prefix + String(maxSeq + 1).padStart(4, '0');
+  }
+  const maxNum = docs.reduce((max, p) => { const m = (p[field]||'').match(/(\d+)$/); return m ? Math.max(max, parseInt(m[1], 10)) : max; }, 0);
+  return String(maxNum + 1); // يكمل من آخر رقم حتى لو القديم فيه حروف
 }
 
 function openItemPicker(ctx) {
@@ -14415,6 +14448,7 @@ function bindAppEvents() {
     };
   });
   if (document.getElementById('party-search')) {
+    if (document.getElementById('party-branch-filter')) document.getElementById('party-branch-filter').onchange = (ev) => { state.partyBranchFilter = ev.target.value; render(); };
     document.getElementById('party-search').oninput = (ev) => {
       state.partyQuery = ev.target.value;
       render();
@@ -14811,7 +14845,7 @@ function bindAppEvents() {
             const m = (p.invoice_number || '').match(/(\d+)$/);
             return m ? Math.max(max, parseInt(m[1], 10)) : max;
           }, 0);
-          const invoiceNumber = String(maxNum+1);
+          const invoiceNumber = nextDocNumber(state.purchases, 'invoice_number');
           const { data: invoice, error } = await sb.from('purchase_invoices').insert({
             invoice_number: invoiceNumber, ...headerPayload, created_by: state.session.user.id,
           }).select().single();
@@ -14819,7 +14853,7 @@ function bindAppEvents() {
           const { error: linesError } = await sb.from('purchase_invoice_items').insert(lineRows.map(l => ({ ...l, invoice_id: invoice.id })));
           if (linesError) { alert('خطأ بحفظ أصناف الفاتورة:\n' + linesError.message); setBtnLoading(document.getElementById('purchase-save'), false); return; }
           state.editingPurchaseId = invoice.id;
-          state.purchaseForm.invoice_number = invoiceNumber;
+          state.purchaseForm.invoice_number = invoice?.invoice_number || invoiceNumber;
         }
         await loadPurchases();
         showToast('تم حفظ الفاتورة بنجاح');
@@ -15101,13 +15135,13 @@ function bindAppEvents() {
           if (qLinesError) { alert('خطأ بحفظ أصناف العرض:\n'+qLinesError.message); return; }
         } else {
           const maxNum = state.quotations.reduce((max,q) => { const m=(q.quote_number||'').match(/(\d+)$/); return m?Math.max(max,parseInt(m[1],10)):max; }, 0);
-          const quoteNumber = String(maxNum+1);
+          const quoteNumber = nextDocNumber(state.quotations, 'quote_number');
           const { data, error } = await sb.from('quotations').insert({ quote_number:quoteNumber, ...headerPayload, created_by: state.session.user.id }).select().single();
           if (error) { alert(/walkin_customer|customer_id/.test(error.message) ? 'لازم تشغّل ملف 17_عرض_سعر_بدون_عميل.sql في Supabase أول.\n\n' + error.message : 'خطأ بالحفظ:\n'+error.message); return; }
           const { error: qLinesError2 } = await sb.from('quotation_items').insert(lineRows.map(l => ({ ...l, quotation_id: data.id })));
           if (qLinesError2) { alert('خطأ بحفظ أصناف العرض:\n'+qLinesError2.message); return; }
           state.editingQuoteId = data.id;
-          state.quoteForm.quote_number = quoteNumber;
+          state.quoteForm.quote_number = data?.quote_number || quoteNumber;
         }
         await loadQuotations();
         render();
@@ -15564,13 +15598,13 @@ function bindAppEvents() {
           if (linesError) { alert('خطأ بحفظ أصناف الفاتورة:\n'+linesError.message); setBtnLoading(document.getElementById('sales-save'), false); return; }
         } else {
           const maxNum = state.salesInvoices.reduce((max,p) => { const m=(p.invoice_number||'').match(/(\d+)$/); return m?Math.max(max,parseInt(m[1],10)):max; }, 0);
-          const invoiceNumber = String(maxNum+1);
+          const invoiceNumber = nextDocNumber(state.salesInvoices, 'invoice_number');
           const { data, error } = await sb.from('sales_invoices').insert({ invoice_number:invoiceNumber, ...headerPayload, created_by: state.session.user.id }).select().single();
           if (error) { alert('خطأ بحفظ الفاتورة:\n'+error.message); setBtnLoading(document.getElementById('sales-save'), false); return; }
           const { error: linesError2 } = await sb.from('sales_invoice_items').insert(lineRows.map(l => ({ ...l, invoice_id: data.id })));
           if (linesError2) { alert('خطأ بحفظ أصناف الفاتورة:\n'+linesError2.message); setBtnLoading(document.getElementById('sales-save'), false); return; }
           state.editingSalesId = data.id;
-          state.salesForm.invoice_number = invoiceNumber;
+          state.salesForm.invoice_number = data?.invoice_number || invoiceNumber;
           if (state.pendingQuoteConvertId) {
             const { error: qConvErr } = await sb.from('quotations').update({ status:'محول لفاتورة', converted_to_invoice_id: data.id }).eq('id', state.pendingQuoteConvertId);
             if (qConvErr) console.error('فشل تحديث حالة عرض السعر بعد التحويل', qConvErr);
@@ -15915,13 +15949,13 @@ function bindAppEvents() {
           if (rLinesError) { alert('خطأ بحفظ أصناف المردود:\n'+rLinesError.message); return; }
         } else {
           const maxNum = state.salesReturns.reduce((max,p) => { const m=(p.return_number||'').match(/(\d+)$/); return m?Math.max(max,parseInt(m[1],10)):max; }, 0);
-          const returnNumber = String(maxNum+1);
+          const returnNumber = nextDocNumber(state.salesReturns, 'return_number');
           const { data, error } = await (async () => { let r = await sb.from('sales_returns').insert({ return_number:returnNumber, ...headerPayload, created_by: state.session.user.id }).select().single(); if (r.error && /source_invoice/.test(r.error.message)) { state.returnLinkColumns = false; delete headerPayload.source_invoice_id; delete headerPayload.source_invoice_number; r = await sb.from('sales_returns').insert({ return_number:returnNumber, ...headerPayload, created_by: state.session.user.id }).select().single(); } return r; })();
           if (error) { alert('خطأ بالحفظ:\n'+error.message); return; }
           const { error: rLinesError2 } = await sb.from('sales_return_items').insert(lineRows.map(l => ({ ...l, return_id: data.id })));
           if (rLinesError2) { alert('خطأ بحفظ أصناف المردود:\n'+rLinesError2.message); return; }
           state.editingSalesReturnId = data.id;
-          state.salesReturnForm.return_number = returnNumber;
+          state.salesReturnForm.return_number = data?.return_number || returnNumber;
         }
         await loadSalesReturns();
         render();
@@ -16143,13 +16177,13 @@ function bindAppEvents() {
           if (prLinesError) { alert('خطأ بحفظ أصناف المردود:\n'+prLinesError.message); return; }
         } else {
           const maxNum = state.purchaseReturns.reduce((max,p) => { const m=(p.return_number||'').match(/(\d+)$/); return m?Math.max(max,parseInt(m[1],10)):max; }, 0);
-          const returnNumber = String(maxNum+1);
+          const returnNumber = nextDocNumber(state.purchaseReturns, 'return_number');
           const { data, error } = await (async () => { let r = await sb.from('purchase_returns').insert({ return_number:returnNumber, ...headerPayload, created_by: state.session.user.id }).select().single(); if (r.error && /source_invoice/.test(r.error.message)) { state.returnLinkColumns = false; delete headerPayload.source_invoice_id; delete headerPayload.source_invoice_number; r = await sb.from('purchase_returns').insert({ return_number:returnNumber, ...headerPayload, created_by: state.session.user.id }).select().single(); } return r; })();
           if (error) { alert('خطأ بالحفظ:\n'+error.message); return; }
           const { error: prLinesError2 } = await sb.from('purchase_return_items').insert(lineRows.map(l => ({ ...l, return_id: data.id })));
           if (prLinesError2) { alert('خطأ بحفظ أصناف المردود:\n'+prLinesError2.message); return; }
           state.editingPurchaseReturnId = data.id;
-          state.purchaseReturnForm.return_number = returnNumber;
+          state.purchaseReturnForm.return_number = data?.return_number || returnNumber;
         }
         await loadPurchaseReturns();
         render();
@@ -16431,6 +16465,8 @@ function bindAppEvents() {
       if (!name) { alert('اكتب اسم الفرع'); return; }
       const payload = { name, code: document.getElementById('br-code').value.trim() || null, phone: document.getElementById('br-phone').value.trim() || null,
         address: document.getElementById('br-address').value.trim() || null, active: state.branchForm?.is_main ? true : document.getElementById('br-active').checked };
+      const pfx = document.getElementById('br-prefix')?.value.trim();
+      if (pfx !== undefined && pfx !== '') { if (!/^[1-9][0-9]?$/.test(pfx)) { alert('رقم الفرع لازم يكون رقم من 1 إلى 99'); return; } payload.doc_prefix = pfx; }
       if (state.editingBranchId) {
         const { error } = await sb.from('branches').update(payload).eq('id', state.editingBranchId);
         if (error) { alert('خطأ بالحفظ:\n' + error.message); return; }
@@ -16574,13 +16610,13 @@ function bindAppEvents() {
           if (trLinesError) { alert('خطأ بحفظ أصناف التحويل:\n'+trLinesError.message); return; }
         } else {
           const maxNum = state.transfers.reduce((max,p) => { const m=(p.transfer_number||'').match(/(\d+)$/); return m?Math.max(max,parseInt(m[1],10)):max; }, 0);
-          const transferNumber = String(maxNum+1);
+          const transferNumber = nextDocNumber(state.transfers, 'transfer_number');
           const { data, error } = await sb.from('warehouse_transfers').insert({ transfer_number:transferNumber, ...headerPayload, created_by: state.session.user.id }).select().single();
           if (error) { alert('خطأ بالحفظ:\n'+error.message); return; }
           const { error: trLinesError2 } = await sb.from('warehouse_transfer_items').insert(lineRows.map(l => ({ ...l, transfer_id: data.id })));
           if (trLinesError2) { alert('خطأ بحفظ أصناف التحويل:\n'+trLinesError2.message); return; }
           state.editingTransferId = data.id;
-          state.transferForm.transfer_number = transferNumber;
+          state.transferForm.transfer_number = data?.transfer_number || transferNumber;
         }
         await loadTransfers();
         render();
@@ -16776,6 +16812,8 @@ function bindAppEvents() {
         vat_applicable: f.vat_applicable !== false, is_individual: !!f.is_individual, whatsapp_enabled: !!f.whatsapp_enabled,
         documents: f.documents || [],
       };
+      if (document.getElementById('p-branch')) payload.branch_id = document.getElementById('p-branch').value || null;
+      else if (!state.editingPartyId && userBranchId()) payload.branch_id = userBranchId();
       if (state.editingPartyId) {
         const { error } = await sb.from('parties').update(payload).eq('id', state.editingPartyId);
         if (error) { alert('خطأ بالحفظ:\n' + error.message); return; }
@@ -16783,7 +16821,7 @@ function bindAppEvents() {
         await loadParties();
       } else {
         const prefix = payload.party_type === 'customer' ? 'C' : payload.party_type === 'supplier' ? 'S' : 'O';
-        const sameType = state.parties.filter(p => p.party_type === payload.party_type);
+        const sameType = (state.partiesAll || state.parties).filter(p => p.party_type === payload.party_type);
         const maxNum = sameType.reduce((max, p) => {
           const m = (p.code || '').match(/(\d+)$/);
           return m ? Math.max(max, parseInt(m[1], 10)) : max;
@@ -16962,11 +17000,11 @@ function bindAppEvents() {
           { const { error: svErr } = await sb.from('receipt_vouchers').update(payload).eq('id', state.editingReceiptVoucherId); if (svErr) { showToast('فشل حفظ التعديلات', 'error'); return; } }
         } else {
           const maxNum = state.receiptVouchers.reduce((max,p) => { const m=(p.voucher_number||'').match(/(\d+)$/); return m?Math.max(max,parseInt(m[1],10)):max; }, 0);
-          const voucherNumber = String(maxNum+1);
+          const voucherNumber = nextDocNumber(state.receiptVouchers, 'voucher_number');
           const { data, error } = await sb.from('receipt_vouchers').insert({ voucher_number:voucherNumber, ...payload, created_by: state.session.user.id }).select().single();
           if (error) { alert('خطأ:\n'+error.message); return; }
           state.editingReceiptVoucherId = data.id;
-          state.receiptVoucherForm.voucher_number = voucherNumber;
+          state.receiptVoucherForm.voucher_number = data?.voucher_number || voucherNumber;
         }
         await loadReceiptVouchers();
         render();
@@ -17087,11 +17125,11 @@ function bindAppEvents() {
           { const { error: svErr2 } = await sb.from('payment_vouchers').update(payload).eq('id', state.editingPaymentVoucherId); if (svErr2) { showToast('فشل حفظ التعديلات', 'error'); return; } }
         } else {
           const maxNum = state.paymentVouchers.reduce((max,p) => { const m=(p.voucher_number||'').match(/(\d+)$/); return m?Math.max(max,parseInt(m[1],10)):max; }, 0);
-          const voucherNumber = String(maxNum+1);
+          const voucherNumber = nextDocNumber(state.paymentVouchers, 'voucher_number');
           const { data, error } = await sb.from('payment_vouchers').insert({ voucher_number:voucherNumber, ...payload, created_by: state.session.user.id }).select().single();
           if (error) { alert('خطأ:\n'+error.message); return; }
           state.editingPaymentVoucherId = data.id;
-          state.paymentVoucherForm.voucher_number = voucherNumber;
+          state.paymentVoucherForm.voucher_number = data?.voucher_number || voucherNumber;
         }
         await loadPaymentVouchers();
         render();
