@@ -1164,6 +1164,8 @@ async function loadParties() {
   state.parties = ub ? state.partiesAll.filter(p => p.branch_id === ub) : state.partiesAll;
 }
 // مستندات فرع العمل الحالي فقط (المستند بدون فرع = الفرع الرئيسي). كل الفروع = بدون فلترة
+// فلترة استعلامات الحسابات والصندوق بفرع العمل (بعد تشغيل ملف 21)
+function brq(q) { const ub = userBranchId(); return (ub && state.jeBranchCol) ? q.eq('branch_id', ub) : q; }
 function scopeBranch(list) {
   const ub = userBranchId(); if (!ub || !Array.isArray(list)) return list || [];
   const mainId = mainBranchId();
@@ -1265,7 +1267,7 @@ async function calcHomeNetProfit() {
     const { data: bl } = await fetchAllQ(() => sb.from('journal_entry_lines').select('debit, credit, journal_entries!inner(source_id)').eq('account_code', acc('cogs')).order('id'));
     return (bl || []).filter(r => ids.has(r.journal_entries?.source_id)).reduce((s, r) => s + Number(r.debit || 0) - Number(r.credit || 0), 0);
   }
-  const { data } = await sb.from('journal_entry_lines').select('debit').eq('account_code', acc('cogs'));
+  const { data } = await brq(sb.from('journal_entry_lines').select('debit')).eq('account_code', acc('cogs'));
   const totalCogs = (data||[]).reduce((s,r) => s + Number(r.debit||0), 0);
   return totalCogs;
 }
@@ -2045,6 +2047,8 @@ async function loadBranches() {
   state.branches = error ? [] : (data || []);
   state.branchesReady = !error;
   state.branchesTried = true;
+  if (!error && state.jeBranchCol === undefined) { const r = await sb.from('journal_entry_lines').select('branch_id').limit(1); state.jeBranchCol = !r.error; }
+  if (!error) await loadBranchPrices();
 }
 // الفروع اللي يقدر المستخدم يشتغل فيها: المدير (أو غير المربوط بفرع) = كل الفروع، والموظف = فرعه + الفروع الإضافية المسموحة
 function branchOptions() {
@@ -2074,10 +2078,11 @@ async function chooseWorkingBranch(id) {
   state.profile.active_branch_id = id;
   state.branchPickOpen = false;
   // كل شي يتبع الفرع الجديد: العملاء والموردين، المستودعات والأرصدة، المستندات
-  state.showForm = false; state.partyBranchFilter = '';
+  Object.keys(state).forEach(k => { if (/^show\w*Form$/.test(k)) state[k] = false; }); state.partyBranchFilter = '';
   state.activeSection = 'الرئيسية';
   await loadParties();
   await loadWarehouseStockMap();
+  await loadBranchPrices();
   refreshBranchScope();
   state.homeCogs = null;
   showToast(id ? `تشتغل الآن في: ${branchName(id)}` : 'تشتغل الآن على كل الفروع', 'success');
@@ -2130,6 +2135,23 @@ function installBranchPickDelegation() {
     if (ob) { const b = state.branches.find(x => x.id === ob.dataset.openBranch); if (b) { state.branchForm = { ...b }; state.editingBranchId = b.id; state.showBranchForm = true; render(); } return; }
     if (e.target.closest('[data-open-branches]')) { openBranchesScreen(); return; }
     if (e.target.closest('[data-branches-close]')) { state.showBranches = false; render(); }
+    if (e.target.closest('[data-open-compare]')) { state.showBranches = false; openBranchCompare(); return; }
+    if (e.target.closest('[data-bc-close]')) { state.showBranchCompare = false; render(); return; }
+    if (e.target.closest('[data-bc-run]')) { state.bcFrom = document.getElementById('bc-from')?.value || state.bcFrom; state.bcTo = document.getElementById('bc-to')?.value || state.bcTo; calcBranchCompare(); return; }
+    const pr = e.target.closest('[data-bc-preset]');
+    if (pr) { const d = new Date(), iso = x => x.toISOString().slice(0, 10); const k = pr.dataset.bcPreset;
+      if (k === 'today') { state.bcFrom = state.bcTo = iso(d); }
+      else if (k === 'month') { state.bcFrom = iso(new Date(d.getFullYear(), d.getMonth(), 1, 12)); state.bcTo = iso(d); }
+      else if (k === 'last') { state.bcFrom = iso(new Date(d.getFullYear(), d.getMonth() - 1, 1, 12)); state.bcTo = iso(new Date(d.getFullYear(), d.getMonth(), 0, 12)); }
+      else if (k === 'year') { state.bcFrom = iso(new Date(d.getFullYear(), 0, 1, 12)); state.bcTo = iso(d); }
+      calcBranchCompare(); return; }
+    if (e.target.closest('[data-bc-excel]')) { exportBranchCompare(); return; }
+  });
+  document.addEventListener('input', e => {
+    const el = e.target.closest && e.target.closest('[data-bp-branch]');
+    if (!el || !state.itemBP) return;
+    const r = state.itemBP.rows[el.dataset.bpBranch] = state.itemBP.rows[el.dataset.bpBranch] || {};
+    r[el.dataset.bpKey] = el.value;
   });
 }
 installBranchPickDelegation();
@@ -2153,12 +2175,34 @@ function itemQtyForUser(it) {
   const m = state.whStock[it.id] || {};
   return myWarehouses().reduce((s2, w) => s2 + Number(m[w.id] || 0), 0);
 }
+// ---------- سعر لكل فرع ----------
+async function loadBranchPrices() {
+  const ub = userBranchId();
+  if (!ub || state.branchPricesOk === false) { state.branchPrices = null; return; }
+  const { data, error } = await fetchAllQ(() => sb.from('item_branch_prices').select('item_id, price, price2, price3').eq('branch_id', ub).order('item_id'));
+  if (error) { state.branchPricesOk = !/item_branch_prices|relation|schema cache/i.test(error.message || '') ? undefined : false; state.branchPrices = null; return; }
+  state.branchPricesOk = true;
+  const m = {}; (data || []).forEach(r => { m[r.item_id] = r; });
+  state.branchPrices = m;
+}
+// سعر الصنف في فرع العمل (لو للفرع سعر خاص)، وإلا السعر العام
+function bprice(item, key = 'price') {
+  if (!item) return '';
+  const r = state.branchPrices && userBranchId() ? state.branchPrices[item.id] : null;
+  return r && Number(r[key]) > 0 ? r[key] : item[key];
+}
 // أثناء الرسم فقط: كمية كل صنف = رصيد مستودعات فرع العمل (الكمية الكلية ترجع فوراً بعد الرسم، فالحفظ والحسابات ما تتأثر)
 function withBranchQty(fn) {
-  if (!isBranchUser() || !state.whStock || !Array.isArray(state.items)) return fn();
-  const saved = state.items.map(it => it.qty);
-  state.items.forEach(it => { it.qty = itemQtyForUser(it); });
-  try { return fn(); } finally { state.items.forEach((it, i) => { it.qty = saved[i]; }); }
+  if (!isBranchUser() || !Array.isArray(state.items)) return fn();
+  const doQty = !!state.whStock, bp = state.branchPrices && Object.keys(state.branchPrices).length ? state.branchPrices : null;
+  if (!doQty && !bp) return fn();
+  const saved = state.items.map(it => [it.qty, it.price, it.price2, it.price3]);
+  state.items.forEach(it => {
+    if (doQty) it.qty = itemQtyForUser(it);
+    const r = bp && bp[it.id];
+    if (r) { if (Number(r.price) > 0) it.price = r.price; if (Number(r.price2) > 0) it.price2 = r.price2; if (Number(r.price3) > 0) it.price3 = r.price3; }
+  });
+  try { return fn(); } finally { state.items.forEach((it, i) => { [it.qty, it.price, it.price2, it.price3] = saved[i]; }); }
 }
 // رصيد الصنف بالفروع الثانية (للعرض فقط)
 function itemQtyOtherBranches(it) {
@@ -2244,7 +2288,7 @@ async function loadTransfers() {
   if (!error) state.transfers = data || [];
 }
 function trStatusOf(x) { return x.status || (x.approved ? 'مستلم' : 'مسودة'); }
-const TR_STATUS_STYLE = { 'مسودة': ['#F1EFE8', '#6E6D5F', 'ti-pencil'], 'مرسل': ['#FFF3D6', '#A8660A', 'ti-truck'], 'مستلم': ['#E1F5EE', '#0F6E56', 'ti-circle-check'], 'مستلم بنقص': ['#FCEBEB', '#C0392B', 'ti-alert-triangle'] };
+const TR_STATUS_STYLE = { 'مطلوب': ['#EFE9FB', '#6B46C1', 'ti-inbox'], 'مرفوض': ['#F1EFE8', '#8B8A7A', 'ti-ban'], 'مسودة': ['#F1EFE8', '#6E6D5F', 'ti-pencil'], 'مرسل': ['#FFF3D6', '#A8660A', 'ti-truck'], 'مستلم': ['#E1F5EE', '#0F6E56', 'ti-circle-check'], 'مستلم بنقص': ['#FCEBEB', '#C0392B', 'ti-alert-triangle'] };
 function trStatusBadge(st) { const [bg, fg, ic] = TR_STATUS_STYLE[st] || TR_STATUS_STYLE['مسودة']; return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:600;background:${bg};color:${fg};"><i class="ti ${ic}"></i>${st === 'مرسل' ? 'في الطريق' : st}</span>`; }
 function filteredTransfers() {
   const q = state.transferQuery.trim().toLowerCase();
@@ -2271,7 +2315,7 @@ async function openTransferById(id) {
   state.transferForm = {
     transfer_number: t.transfer_number, from_warehouse_id: t.from_warehouse_id, to_warehouse_id: t.to_warehouse_id,
     transfer_date: t.transfer_date, notes: t.notes||'', approved: !!t.approved, status: trStatusOf(t), received_notes: t.received_notes || '',
-    sent_at: t.sent_at || null, received_at: t.received_at || null,
+    sent_at: t.sent_at || null, received_at: t.received_at || null, rejected_reason: t.rejected_reason || '', requested_at: t.requested_at || null,
     lines: (lineRows||[]).map(l => ({ item_id:l.item_id, item_name:l.items?.name||'', sku:l.items?.sku||'', unit:l.items?.unit||'', quantity:Number(l.quantity), received_qty: l.received_qty == null ? null : Number(l.received_qty) })),
   };
   state.editingTransferId = id;
@@ -2580,6 +2624,7 @@ const SUBMENUS = {
     { divider: true },
     { label: 'قائمة الدخل', target: '__income_statement__' },
     { label: 'قائمة المركز المالي (الميزانية)', target: '__balance_sheet__' },
+    { label: 'مقارنة الفروع', target: '__branch_compare__' },
     { divider: true },
     { label: 'الأصول الثابتة والإهلاك', target: '__fixed_assets__' },
     { label: 'مصمّم التقارير', target: '__report_designer__' },
@@ -2680,7 +2725,7 @@ function renderApp() {
                   : item.target === '__sys_features__' ? isDesigner()
                   : item.target === '__account_mapping__' ? isDesigner()
                   : true
-                ) : SUBMENUS[m]).filter(item => item.divider || item.header || (menuFeatureOk(item.target) && (item.target !== '__cash_recon__' || isAdmin() || canApprove())))
+                ) : SUBMENUS[m]).filter(item => item.divider || item.header || (menuFeatureOk(item.target) && (item.target !== '__cash_recon__' || isAdmin() || canApprove()) && (item.target !== '__branch_compare__' || (isAdmin() && (state.branches || []).filter(b => b.active !== false).length > 1))))
                   .filter((item, i, arr) => !item.header || (arr[i + 1] && !arr[i + 1].header && !arr[i + 1].divider))
                   .map(item => item.header
                 ? `<div style="display:flex;align-items:center;gap:6px;padding:8px 14px 4px;font-size:11px;font-weight:700;color:#8B8A7A;letter-spacing:.2px;border-top:1px solid #EEECE4;margin-top:2px;"><i class="ti ${item.icon || 'ti-point'}" style="font-size:13px;"></i>${item.header}</div>`
@@ -2714,6 +2759,7 @@ function renderApp() {
   ${state.showTrialBalance ? renderTrialBalanceModal() : ''}
   ${state.showGeneralLedger ? renderGeneralLedgerModal() : ''}
   ${state.showAccountStatement ? renderAccountStatementModal() : ''}
+  ${state.showBranchCompare ? renderBranchCompareModal() : ''}
   ${state.showReportDesigner ? renderReportDesignerModal() : ''}
   ${state.showFixedAssets ? renderFixedAssetsModal() : ''}
   ${state.showEmployees ? renderEmployeesModal() : ''}
@@ -3742,7 +3788,7 @@ async function loadOwnerDash() {
     for (let i = 6; i >= 0; i--) { const x = new Date(); x.setHours(12); x.setDate(x.getDate() - i); const k = x.toISOString().slice(0, 10); days.push({ k, total: sum(sales.filter(s => s.invoice_date === k)) }); }
     // الربح من القيود (إيراد المبيعات − المردودات − تكلفة البضاعة)
     const salesAccs = [...new Set([acc('sales_cash'), acc('sales_credit')])], retAcc = acc('sales_returns'), cogsAcc = acc('cogs');
-    const pl = await fetchAllQ(() => sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date)').in('account_code', [...salesAccs, retAcc, cogsAcc]).gte('journal_entries.entry_date', R.from).lte('journal_entries.entry_date', R.to).order('id'));
+    const pl = await fetchAllQ(() => brq(sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date)')).in('account_code', [...salesAccs, retAcc, cogsAcc]).gte('journal_entries.entry_date', R.from).lte('journal_entries.entry_date', R.to).order('id'));
     let revenue = 0, returnsAmt = 0, cogs = 0;
     (pl.data || []).forEach(l => {
       const dr = Number(l.debit || 0), cr = Number(l.credit || 0);
@@ -3752,7 +3798,7 @@ async function loadOwnerDash() {
     });
     // النقدية: رصيد الصندوق والبنك (وكل حساب مربوط بطريقة دفع)
     const cashAccs = [...new Set([acc('cash'), acc('bank'), ...activePaymentMethods().map(m => cashOrBankAccount(m.name))])];
-    const cashRes = await fetchAllQ(() => sb.from('journal_entry_lines').select('account_code, debit, credit').in('account_code', cashAccs).order('id'));
+    const cashRes = await fetchAllQ(() => brq(sb.from('journal_entry_lines').select('account_code, debit, credit')).in('account_code', cashAccs).order('id'));
     const cashByAcc = {};
     (cashRes.data || []).forEach(l => { cashByAcc[l.account_code] = (cashByAcc[l.account_code] || 0) + Number(l.debit || 0) - Number(l.credit || 0); });
     // أكثر الأصناف مبيعاً
@@ -3920,7 +3966,7 @@ async function openShiftModal() {
   if (state.shift) { state.shiftCalc = await computeShiftTotals(state.shift); render(); }
 }
 async function loadShiftHistory() {
-  const { data } = await sb.from('cashier_shifts').select('*').not('closed_at', 'is', null).order('closed_at', { ascending: false }).limit(60);
+  const { data } = await brq(sb.from('cashier_shifts').select('*')).not('closed_at', 'is', null).order('closed_at', { ascending: false }).limit(60);
   state.shiftHistory = data || [];
 }
 function shiftCountedTotal() {
@@ -4409,6 +4455,7 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
+const APP_VERSION = '2026.10.10-5';
 function renderHomeSection() {
   const c = state.company || {};
   const phones = [
@@ -4565,7 +4612,7 @@ function homeAnalyticsPanel() {
           <div style="margin-top:auto;display:flex;align-items:center;justify-content:center;gap:10px;padding-top:10px;border-top:1px solid #EEF0F4;">
             <svg width="26" height="26" viewBox="0 0 200 200"><rect x="10" y="10" width="180" height="180" rx="38" fill="#0F172A"/><line x1="100" y1="45" x2="60" y2="150" stroke="#F8FAFC" stroke-width="13" stroke-linecap="round"/><line x1="100" y1="45" x2="140" y2="150" stroke="#F8FAFC" stroke-width="13" stroke-linecap="round"/><line x1="72" y1="118" x2="128" y2="118" stroke="#22C55E" stroke-width="11" stroke-linecap="round"/></svg>
             <span style="font-size:11.5px;color:#5F5E5A;">${t('developed_by')} أحمد سوفت · <span dir="ltr">0545335561</span></span>
-            <span style="font-size:10.5px;color:#0F6E56;"><i class="ti ti-shield-check"></i> ZATCA</span>
+            <span style="font-size:10.5px;color:#0F6E56;"><i class="ti ti-shield-check"></i> ZATCA</span> <span style="font-size:10px;color:#A9A48C;" title="رقم الإصدار">إصدار ${APP_VERSION}</span>
           </div>
         </div>`;
 }
@@ -6436,6 +6483,135 @@ function renderWarehousesSection() {
       </div>
       ${state.showWarehouseForm ? renderWarehouseFormModal() : ''}`;
 }
+// ---------- مقارنة الفروع ----------
+async function openBranchCompare() {
+  if (!isAdmin()) { showToast('هذا التقرير للمدير فقط'); return; }
+  const d = new Date();
+  if (!state.bcFrom) { state.bcFrom = new Date(d.getFullYear(), d.getMonth(), 1, 12).toISOString().slice(0, 10); state.bcTo = d.toISOString().slice(0, 10); }
+  state.showBranchCompare = true; state.bc = null; render();
+  calcBranchCompare();
+}
+async function calcBranchCompare() {
+  state.bcLoading = true; render();
+  try {
+    const from = state.bcFrom, to = state.bcTo;
+    const brs = (state.branches || []).filter(b => b.active !== false);
+    const mainId = mainBranchId();
+    const bOf = x => x.branch_id || mainId;
+    const inR = dt => (dt || '') >= from && (dt || '') <= to;
+    const [si, sr, pi] = await Promise.all([
+      fetchAllQ(() => sb.from('sales_invoices').select('id, branch_id, total, invoice_date, approved').eq('approved', true).gte('invoice_date', from).lte('invoice_date', to).order('id')),
+      fetchAllQ(() => sb.from('sales_returns').select('id, branch_id, total, return_date, approved').eq('approved', true).gte('return_date', from).lte('return_date', to).order('id')),
+      fetchAllQ(() => sb.from('purchase_invoices').select('id, branch_id, total, invoice_date, approved').eq('approved', true).gte('invoice_date', from).lte('invoice_date', to).order('id')),
+    ]);
+    const R = {}; brs.forEach(b => { R[b.id] = { sales: 0, salesCount: 0, returns: 0, purchases: 0, revenue: null, cogs: null, expenses: null, cash: null, debts: 0, stock: 0 }; });
+    const add = (bid, k, v) => { if (R[bid]) R[bid][k] += v; };
+    (si.data || []).forEach(x => { add(bOf(x), 'sales', Number(x.total || 0)); add(bOf(x), 'salesCount', 1); });
+    (sr.data || []).forEach(x => add(bOf(x), 'returns', Number(x.total || 0)));
+    (pi.data || []).forEach(x => add(bOf(x), 'purchases', Number(x.total || 0)));
+    // الحسابات (بعد ملف 21): الإيراد والتكلفة والمصروفات للفترة، والصندوق حتى اليوم
+    if (state.jeBranchCol) {
+      const cogsAcc = acc('cogs'), cashAcc = acc('cash');
+      const pl = await fetchAllQ(() => sb.from('journal_entry_lines').select('account_code, debit, credit, branch_id, journal_entries!inner(entry_date, source_type)').neq('journal_entries.source_type', 'closing').gte('journal_entries.entry_date', from).lte('journal_entries.entry_date', to).order('id'));
+      brs.forEach(b => { R[b.id].revenue = 0; R[b.id].cogs = 0; R[b.id].expenses = 0; R[b.id].cash = 0; });
+      (pl.data || []).forEach(l => { const r = R[l.branch_id || mainId]; if (!r) return; const c = String(l.account_code || ''), dr = Number(l.debit || 0), cr = Number(l.credit || 0);
+        if (c.startsWith('4')) r.revenue += cr - dr;
+        else if (c === cogsAcc || c.startsWith(cogsAcc)) r.cogs += dr - cr;
+        else if (c.startsWith('5')) r.expenses += dr - cr; });
+      const cash = await fetchAllQ(() => sb.from('journal_entry_lines').select('debit, credit, branch_id').like('account_code', cashAcc + '%').order('id'));
+      (cash.data || []).forEach(l => { const r = R[l.branch_id || mainId]; if (r) r.cash += Number(l.debit || 0) - Number(l.credit || 0); });
+    }
+    // ديون العملاء لكل فرع
+    (state.partiesAll || []).forEach(p => { if (p.party_type === 'customer' && Number(p.balance || 0) > 0) add(p.branch_id || mainId, 'debts', Number(p.balance)); });
+    // قيمة المخزون لكل فرع (رصيد مستودعات الفرع × التكلفة)
+    const st = await fetchAllQ(() => sb.from('item_warehouse_stock').select('item_id, warehouse_id, qty').order('item_id').order('warehouse_id'));
+    const costOf = {}; (state.items || []).forEach(it => { costOf[it.id] = Number(it.cost || 0); });
+    const whB = {}; state.warehouses.forEach(w => { whB[w.id] = w.branch_id || mainId; });
+    (st.data || []).forEach(r => { const q = Number(r.qty || 0); if (q > 0) add(whB[r.warehouse_id], 'stock', q * (costOf[r.item_id] || 0)); });
+    state.bc = { from, to, rows: R, branches: brs };
+  } catch (e) { showToast('تعذّر حساب التقرير: ' + (e.message || e), 'error'); }
+  state.bcLoading = false; render();
+}
+function bcMetrics() {
+  const hasJ = !!state.jeBranchCol;
+  return [
+    { k: 'sales', l: 'المبيعات (شامل الضريبة)', v: r => r.sales },
+    { k: 'salesCount', l: 'عدد الفواتير', v: r => r.salesCount, count: true },
+    { k: 'avg', l: 'متوسط الفاتورة', v: r => r.salesCount ? r.sales / r.salesCount : 0 },
+    { k: 'returns', l: 'المردودات', v: r => r.returns, neg: true },
+    { k: 'net', l: 'صافي المبيعات', v: r => r.sales - r.returns, strong: true },
+    ...(hasJ ? [
+      { k: 'revenue', l: 'الإيراد (بدون ضريبة)', v: r => r.revenue },
+      { k: 'cogs', l: 'تكلفة المبيعات', v: r => r.cogs, neg: true },
+      { k: 'gross', l: 'مجمل الربح', v: r => r.revenue - r.cogs, strong: true },
+      { k: 'expenses', l: 'المصروفات', v: r => r.expenses, neg: true },
+      { k: 'profit', l: 'صافي الربح', v: r => r.revenue - r.cogs - r.expenses, strong: true, profit: true },
+      { k: 'cash', l: 'رصيد الصندوق (حتى اليوم)', v: r => r.cash },
+    ] : []),
+    { k: 'purchases', l: 'المشتريات', v: r => r.purchases },
+    { k: 'debts', l: 'مستحق على العملاء', v: r => r.debts },
+    { k: 'stock', l: 'قيمة المخزون (بالتكلفة)', v: r => r.stock },
+  ];
+}
+function renderBranchCompareModal() {
+  const bc = state.bc, M = bcMetrics();
+  const pres = [['today', 'اليوم'], ['month', 'هذا الشهر'], ['last', 'الشهر الماضي'], ['year', 'هذه السنة']];
+  const colors = ['#2C4A6E', '#BA7517', '#0F6E56', '#6B46C1', '#C0392B', '#2E86C1', '#8E5B3E'];
+  let body = '<div style="padding:30px;text-align:center;color:#6E6D5F;font-size:13px;">جاري الحساب…</div>';
+  if (bc && !state.bcLoading) {
+    const brs = bc.branches, tot = k => brs.reduce((s2, b) => s2 + (M.find(m => m.k === k).v(bc.rows[b.id]) || 0), 0);
+    const barMetric = (key, label) => { const m = M.find(x => x.k === key); if (!m) return ''; const vals = brs.map(b => m.v(bc.rows[b.id]) || 0); const mx = Math.max(1, ...vals.map(v => Math.abs(v)));
+      return `<div style="flex:1;min-width:260px;border:1px solid #E4E2DA;border-radius:10px;padding:10px 12px;">
+        <div style="font-size:12px;font-weight:700;color:#1B3352;margin-bottom:8px;">${label}</div>
+        ${brs.map((b, i) => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:11.5px;">
+          <span style="width:90px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(b.name)}</span>
+          <div style="flex:1;background:#F1EFE8;border-radius:6px;height:16px;overflow:hidden;"><div style="height:100%;width:${Math.max(2, Math.abs(vals[i]) / mx * 100)}%;background:${vals[i] < 0 ? '#C0392B' : colors[i % colors.length]};border-radius:6px;"></div></div>
+          <b class="mono" style="width:90px;text-align:left;color:${vals[i] < 0 ? '#C0392B' : '#1F2421'};">${fmt(vals[i])}</b></div>`).join('')}
+      </div>`; };
+    body = `
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;">${barMetric('net', 'صافي المبيعات')}${barMetric(state.jeBranchCol ? 'profit' : 'salesCount', state.jeBranchCol ? 'صافي الربح' : 'عدد الفواتير')}</div>
+      <div style="overflow-x:auto;border:1px solid #E4E2DA;border-radius:10px;">
+        <table style="width:100%;border-collapse:collapse;font-size:12px;">
+          <thead><tr>
+            <th style="padding:8px;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;text-align:right;font-weight:500;">البند</th>
+            ${brs.map(b => `<th style="padding:8px;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;text-align:left;font-weight:500;white-space:nowrap;">${escapeHtml(b.name)}${b.is_main ? ' ⭐' : ''}</th>`).join('')}
+            <th style="padding:8px;background:#0F2A47;color:#fff;text-align:left;font-weight:600;">الإجمالي</th>
+          </tr></thead>
+          <tbody>
+            ${M.map((m, i) => { const bg = m.strong ? '#EEF3F9' : i % 2 ? '#F4F1EA' : '#FFFDF6'; const show = v => m.count ? Math.round(v) : fmt(v);
+              const best = m.neg ? null : brs.reduce((a, b) => (m.v(bc.rows[b.id]) || 0) > (m.v(bc.rows[a.id]) || 0) ? b : a, brs[0]);
+              const totV = m.k === 'avg' ? (tot('salesCount') ? tot('sales') / tot('salesCount') : 0) : tot(m.k);
+              return `<tr>
+              <td style="padding:7px 8px;background:${bg};font-weight:${m.strong ? 700 : 500};">${m.l}</td>
+              ${brs.map(b => { const v = m.v(bc.rows[b.id]) || 0; return `<td class="mono" style="padding:7px 8px;background:${bg};text-align:left;font-weight:${m.strong ? 700 : 400};color:${m.profit && v < 0 ? '#C0392B' : m.neg && v ? '#A8660A' : '#1F2421'};">${show(v)}${best && best.id === b.id && brs.length > 1 && v > 0 ? ' 🏆' : ''}</td>`; }).join('')}
+              <td class="mono" style="padding:7px 8px;background:${m.strong ? '#DCE6F2' : '#ECEAE2'};text-align:left;font-weight:700;">${show(totV)}</td>
+            </tr>`; }).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${state.jeBranchCol ? '' : '<div style="margin-top:8px;font-size:11.5px;color:#A8660A;"><i class="ti ti-info-circle"></i> الأرباح والصندوق لكل فرع بتظهر بعد تشغيل ملف 21 في قاعدة البيانات.</div>'}
+      <div style="margin-top:8px;font-size:10.5px;color:#8B8A7A;">الفترة: ${escapeHtml(bc.from)} — ${escapeHtml(bc.to)} · 🏆 = الأعلى · الصندوق والديون وقيمة المخزون حتى اليوم</div>`;
+  }
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;padding:16px;z-index:11;">
+    <div style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:1000px;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+      <div class="win-title"><span><i class="ti ti-chart-bar"></i> مقارنة الفروع</span><button data-bc-close style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
+      <div style="padding:12px 16px 0;display:flex;gap:8px;align-items:end;flex-wrap:wrap;">
+        ${pres.map(([k, l]) => `<button data-bc-preset="${k}" class="btn" style="padding:5px 12px;font-size:12px;">${l}</button>`).join('')}
+        <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">من</div><input id="bc-from" type="date" class="input" style="padding:5px 8px;" value="${escapeHtml(state.bcFrom || '')}" /></div>
+        <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">إلى</div><input id="bc-to" type="date" class="input" style="padding:5px 8px;" value="${escapeHtml(state.bcTo || '')}" /></div>
+        <button data-bc-run class="btn primary" style="padding:6px 14px;">عرض</button>
+        <button data-bc-excel class="btn" style="padding:6px 12px;margin-right:auto;" ${bc ? '' : 'disabled'}><i class="ti ti-file-spreadsheet"></i> Excel</button>
+      </div>
+      <div style="padding:12px 16px 16px;overflow-y:auto;">${body}</div>
+    </div>
+  </div>`;
+}
+function exportBranchCompare() {
+  const bc = state.bc; if (!bc) return; const M = bcMetrics();
+  const rows = M.map(m => [m.l, ...bc.branches.map(b => Math.round((m.v(bc.rows[b.id]) || 0) * 100) / 100)]);
+  exportFormattedAccountingSheet(`مقارنة الفروع ${bc.from} - ${bc.to}.xlsx`, 'مقارنة الفروع', ['البند', ...bc.branches.map(b => b.name)], rows);
+}
 async function openBranchesScreen() {
   if (!isAdmin()) { showToast('هذا القسم للمدير فقط'); return; }
   await loadWarehouses(); await loadUsers();
@@ -6453,7 +6629,8 @@ function renderBranchesModal() {
       <div style="padding:14px 16px;overflow-y:auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
           <div style="font-size:12px;color:#5F5E5A;line-height:1.7;">كل فرع محل مستقل: عملاؤه ومورديه وترقيم فواتيره ومستودعه.<br>اربط كل موظف بفرعه من <b>النظام ← المستخدمين</b>.</div>
-          <button id="new-branch-btn" class="btn primary" style="padding:8px 16px;"><i class="ti ti-plus"></i> فرع جديد</button>
+          <div style="display:flex;gap:8px;">${state.branches.filter(b => b.active !== false).length > 1 ? '<button data-open-compare class="btn" style="padding:8px 14px;"><i class="ti ti-chart-bar"></i> مقارنة الفروع</button>' : ''}
+          <button id="new-branch-btn" class="btn primary" style="padding:8px 16px;"><i class="ti ti-plus"></i> فرع جديد</button></div>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;">
           ${state.branches.map(b => `
@@ -6533,14 +6710,19 @@ function renderTransfersSection() {
       <div class="panel">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
           <div style="flex:1;min-width:220px;"><input id="tr-search" class="input" placeholder="بحث برقم السند..." value="${escapeHtml(state.transferQuery)}" /></div>
+          ${state.branchesReady && userBranchId() && state.warehouses.some(w => w.branch_id && w.branch_id !== userBranchId() && w.active !== false) ? `<button id="new-tr-req-btn" class="btn" style="padding:8px 14px;border-color:#6B46C1;color:#6B46C1;"><i class="ti ti-inbox"></i> طلب بضاعة من فرع</button>` : ''}
           <button id="new-tr-btn" class="btn primary" style="padding:8px 14px;">+ سند تحويل جديد</button>
         </div>
+        ${(() => { const ub = userBranchId(); const reqs = state.transfers.filter(x => trStatusOf(x) === 'مطلوب' && (ub ? x.from?.branch_id === ub : canApprove())); return reqs.length ? `
+        <div style="background:#EFE9FB;border:1px solid #B9A3EA;border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12.5px;color:#4C2F96;display:flex;align-items:center;gap:8px;">
+          <i class="ti ti-inbox" style="font-size:18px;"></i><b>${reqs.length} طلب بضاعة من فروع أخرى بانتظار موافقتك</b> — افتح الطلب، عدّل الكميات لو لازم، واضغط «موافقة وإرسال».
+          <button type="button" id="tr-show-reqs" class="btn" style="padding:3px 10px;font-size:11.5px;margin-right:auto;">عرضها</button></div>` : ''; })()}
         ${(() => { const pending = state.transfers.filter(x => trStatusOf(x) === 'مرسل' && (!userBranchId() || x.to?.branch_id === userBranchId())); return pending.length ? `
         <div style="background:#FFF3D6;border:1px solid #F0C36D;border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12.5px;color:#8A5A12;display:flex;align-items:center;gap:8px;">
           <i class="ti ti-truck" style="font-size:18px;"></i><b>${pending.length} تحويل بالطريق بانتظار الاستلام</b> — افتح السند واضغط «تأكيد الاستلام» لما توصل البضاعة.
           <button type="button" id="tr-show-pending" class="btn" style="padding:3px 10px;font-size:11.5px;margin-right:auto;">عرضها</button></div>` : ''; })()}
         <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-bottom:10px;">
-          <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">الحالة</div><select id="tr-f-status" class="input" style="padding:5px 8px;">${['', 'مسودة', 'مرسل', 'مستلم', 'مستلم بنقص'].map(v => `<option value="${v}" ${state.transferFilterStatus === v ? 'selected' : ''}>${v === '' ? 'الكل' : v === 'مرسل' ? 'في الطريق' : v}</option>`).join('')}</select></div>
+          <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">الحالة</div><select id="tr-f-status" class="input" style="padding:5px 8px;">${['', 'مطلوب', 'مسودة', 'مرسل', 'مستلم', 'مستلم بنقص', 'مرفوض'].map(v => `<option value="${v}" ${state.transferFilterStatus === v ? 'selected' : ''}>${v === '' ? 'الكل' : v === 'مرسل' ? 'في الطريق' : v}</option>`).join('')}</select></div>
           <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">من تاريخ</div><input id="tr-f-from" type="date" class="input" style="padding:5px 8px;" value="${escapeHtml(state.transferFilterFrom || '')}" /></div>
           <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">إلى تاريخ</div><input id="tr-f-to" type="date" class="input" style="padding:5px 8px;" value="${escapeHtml(state.transferFilterTo || '')}" /></div>
           <button id="tr-f-clear" class="btn" style="padding:6px 12px;">مسح</button>
@@ -6568,8 +6750,11 @@ function renderTransferFormModal() {
   const canReceive = st === 'مرسل' && (!ub || ub === toB) && (canApprove() || ub === toB);
   const showRecv = st === 'مرسل' && canReceive;
   const showRecvCol = st === 'مستلم بنقص' || st === 'مستلم' && f.lines.some(l => l.received_qty != null && l.received_qty !== l.quantity);
-  const fromOpts = locked ? state.warehouses : myWarehouses();
-  const toOpts = state.warehouses.filter(w => w.id !== f.from_warehouse_id && w.active !== false);
+  const isReqNew = !!f.is_request && !state.editingTransferId;
+  const canApproveReq = st === 'مطلوب' && (ub ? ub === fromB : canApprove());
+  const canCancelReq = st === 'مطلوب' && !!ub && ub === toB && !canApproveReq;
+  const fromOpts = locked ? state.warehouses : isReqNew ? state.warehouses.filter(w => w.branch_id !== ub && w.active !== false) : myWarehouses();
+  const toOpts = isReqNew ? myWarehouses() : state.warehouses.filter(w => w.id !== f.from_warehouse_id && w.active !== false);
   const th = h => `<th style="padding:7px 6px;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;font-size:10.5px;font-weight:500;text-align:right;">${h}</th>`;
   return `
   <div id="tr-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;padding:16px;z-index:10;">
@@ -6582,7 +6767,8 @@ function renderTransferFormModal() {
         ${crossBranch && st === 'مسودة' ? `<span style="font-size:11.5px;color:#A8660A;background:#FFF8E8;border:1px solid #F0C36D;border-radius:8px;padding:3px 9px;"><i class="ti ti-truck"></i> تحويل بين فرعين: يُرسل أولاً، ثم يؤكد الفرع المستلِم الاستلام</span>` : ''}
       </div>
       <div class="no-print" style="padding:8px 16px 0;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
-        ${partyField(t('tr_from')+' *', `<select id="tr-from" class="input" ${locked?'disabled':''}>${fromOpts.map(w => `<option value="${w.id}" ${f.from_warehouse_id===w.id?'selected':''}>${escapeHtml(whLabel(w))}</option>`).join('')}</select>`)}
+        ${isReqNew || st === 'مطلوب' || st === 'مرفوض' ? `<div style="grid-column:1/-1;background:#EFE9FB;border:1px solid #B9A3EA;border-radius:8px;padding:8px 12px;font-size:12px;color:#4C2F96;"><i class="ti ti-inbox"></i> ${isReqNew ? '<b>طلب بضاعة:</b> اختار الفرع اللي عايز تطلب منه، وأضف الأصناف والكميات، واضغط «إرسال الطلب». الفرع التاني بيوافق ويرسل.' : st === 'مطلوب' ? `<b>طلب بضاعة من ${escapeHtml(branchName(toB) || 'فرع')}</b>${canApproveReq ? ' — عدّل الكمية المرسلة لو لازم (0 = ما متوفر)، واضغط «موافقة وإرسال».' : ' — بانتظار موافقة ' + escapeHtml(branchName(fromB) || 'الفرع المرسِل') + '.'}` : `<b>الطلب مرفوض</b>${f.rejected_reason ? ' — ' + escapeHtml(f.rejected_reason) : ''}`}</div>` : ''}
+        ${partyField(isReqNew ? 'اطلب من مستودع *' : t('tr_from')+' *', `<select id="tr-from" class="input" ${locked?'disabled':''}>${isReqNew ? '<option value="">اختر...</option>' : ''}${fromOpts.map(w => `<option value="${w.id}" ${f.from_warehouse_id===w.id?'selected':''}>${escapeHtml(whLabel(w))}</option>`).join('')}</select>`)}
         ${partyField(t('tr_to')+' *', `<select id="tr-to" class="input" ${locked?'disabled':''}><option value="">اختر...</option>${(locked ? state.warehouses : toOpts).map(w => `<option value="${w.id}" ${f.to_warehouse_id===w.id?'selected':''}>${escapeHtml(whLabel(w))}</option>`).join('')}</select>`)}
         ${partyField(t('tr_date'), `<input id="tr-date" type="date" class="input" value="${escapeHtml(f.transfer_date)}" ${locked?'disabled':''} />`)}
       </div>
@@ -6604,13 +6790,14 @@ function renderTransferFormModal() {
         <div class="print-scroll" style="border:1px solid #E4E2DA;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(27,51,82,0.06);overflow-x:auto;">
           <table style="width:100%;border-collapse:collapse;">
             <thead><tr>
-              ${[t('col_no'),t('col_item_sku'),t('col_item_name'),t('col_unit'),t('col_qty_transfer'), ...(showRecv || showRecvCol ? ['المستلم'] : []), ''].map(th).join('')}
+              ${[t('col_no'),t('col_item_sku'),t('col_item_name'),t('col_unit'),isReqNew || st === 'مطلوب' ? 'الكمية المطلوبة' : t('col_qty_transfer'), ...(showRecv || showRecvCol ? ['المستلم'] : []), ...(canApproveReq ? ['الكمية المرسلة'] : []), ''].map(th).join('')}
             </tr></thead>
             <tbody>
               ${f.lines.map((l,idx) => { const bg = idx%2?'#F4F1EA':'#FFFDF6'; const td = (v, ex = '') => `<td style="padding:7px 6px;background:${bg};font-size:11.5px;border-bottom:1px solid #E4E2DA;white-space:nowrap;${ex}">${v}</td>`; return `
               <tr>
               ${td(idx+1, 'color:#8B8A7A;')}${td(escapeHtml(l.sku||''), 'font-family:monospace;')}${td(escapeHtml(l.item_name), 'white-space:normal;')}${td(escapeHtml(l.unit||''))}${td(l.quantity, 'font-family:monospace;')}
               ${showRecv ? td(`<input data-tr-recv="${l.item_id}" class="input mono" type="number" min="0" max="${l.quantity}" step="any" value="${l.quantity}" style="width:80px;padding:3px 6px;" />`) : showRecvCol ? td(`<b style="color:${(l.received_qty ?? l.quantity) < l.quantity ? '#C0392B' : '#0F6E56'};">${l.received_qty ?? l.quantity}</b>${(l.received_qty ?? l.quantity) < l.quantity ? ` <span style="color:#C0392B;font-size:10.5px;">(نقص ${l.quantity - l.received_qty})</span>` : ''}`, 'font-family:monospace;') : ''}
+              ${canApproveReq ? td(`<input data-tr-reqqty="${l.item_id}" class="input mono" type="number" min="0" step="any" value="${l.quantity}" style="width:80px;padding:3px 6px;" /><span style="font-size:10.5px;color:#6E6D5F;margin-right:4px;">متوفر ${state.whStock ? (state.whStock[l.item_id]?.[f.from_warehouse_id] ?? 0) : '—'}</span>`) : ''}
               ${td(locked ? '' : `<button data-remove-tr-line="${idx}" class="no-print" style="border:none;background:none;color:#C0392B;cursor:pointer;font-size:14px;">✕</button>`, 'padding:4px;')}
               </tr>`; }).join('') || `<tr><td colspan="7" style="padding:16px;text-align:center;font-size:12px;color:#6E6D5F;">${t('no_items_returns')}</td></tr>`}
             </tbody>
@@ -6625,8 +6812,10 @@ function renderTransferFormModal() {
         ${iconBtn('tr-print', 'ti-printer', '#5F5E5A', 'طباعة', !state.editingTransferId)}
         ${iconBtn('tr-pdf', 'ti-file-type-pdf', '#D9534F', 'حفظ PDF (طباعة)', !state.editingTransferId)}
         ${locked ? '' : iconBtn('tr-cancel', 'ti-x', '#C0392B', 'الغاء')}
-        ${locked ? '' : iconBtn('tr-save', 'ti-device-floppy', '#2C4A6E', 'حفظ')}
-        ${(!locked && state.editingTransferId && canApprove()) ? iconBtn('tr-approve', crossBranch ? 'ti-truck' : 'ti-lock', '#0F6E56', crossBranch ? 'إرسال للفرع' : 'ترحيل (نقل المخزون)') : ''}
+        ${locked ? '' : iconBtn('tr-save', isReqNew ? 'ti-send' : 'ti-device-floppy', isReqNew ? '#6B46C1' : '#2C4A6E', isReqNew ? 'إرسال الطلب' : 'حفظ')}
+        ${canApproveReq ? iconBtn('tr-req-approve', 'ti-truck', '#0F6E56', 'موافقة وإرسال') + iconBtn('tr-req-reject', 'ti-ban', '#C0392B', 'رفض الطلب') : ''}
+        ${canCancelReq ? iconBtn('tr-req-cancel', 'ti-x', '#C0392B', 'إلغاء الطلب') : ''}
+        ${(!locked && !isReqNew && state.editingTransferId && canApprove()) ? iconBtn('tr-approve', crossBranch ? 'ti-truck' : 'ti-lock', '#0F6E56', crossBranch ? 'إرسال للفرع' : 'ترحيل (نقل المخزون)') : ''}
         ${showRecv ? iconBtn('tr-receive', 'ti-circle-check', '#0F6E56', 'تأكيد الاستلام') : ''}
         ${st === 'مرسل' && isAdmin() ? iconBtn('tr-cancel-send', 'ti-arrow-back-up', '#BA7517', 'إلغاء الإرسال') : ''}
       </div>
@@ -10739,6 +10928,7 @@ function renderTabContent() {
         <option value="percent_on_cost" ${f.pricing_method==='percent_on_cost'?'selected':''}>نسبة على التكلفة</option>
         <option value="amount_on_cost" ${f.pricing_method==='amount_on_cost'?'selected':''}>مبلغ على التكلفة</option>
       </select>`)}
+      ${renderItemBranchPricesBlock()}
       ${sectionHeader('التكلفة', 'ti-currency-dollar')}
       ${field('التكلفة الافتتاحية', `<input id="f-opening_cost" class="input" value="${escapeHtml(f.opening_cost)}" />`)}
       ${field('التكلفة الأجنبية', `<input id="f-foreign_cost" class="input" value="${escapeHtml(f.foreign_cost)}" />`)}
@@ -10936,13 +11126,55 @@ async function loadLastPurchasePrices(itemId, limit = 3) {
 
 // يحدد سعر الصنف المناسب حسب "مستوى السعر" المسجّل بكرت العميل (سعر1/سعر2/سعر3)
 // يرجع السعر الأساسي (price) لو العميل مو محدد، أو مستوى سعره فاضي/صفر بالصنف
+// أسعار الفروع داخل كرت الصنف (للمدير، لما يكون فيه أكتر من فرع)
+function renderItemBranchPricesBlock() {
+  const brs = (state.branches || []).filter(b => !b.is_main && b.active !== false);
+  if (!state.branchesReady || !brs.length || !isAdmin() || state.branchPricesOk === false) return '';
+  const key = state.editingId || 'new';
+  if (!state.itemBP || state.itemBP.forId !== key) {
+    state.itemBP = { forId: key, rows: {}, loading: !!state.editingId };
+    if (state.editingId) sb.from('item_branch_prices').select('branch_id, price, price2, price3').eq('item_id', state.editingId).then(({ data, error }) => {
+      if (!state.itemBP || state.itemBP.forId !== key) return;
+      if (error) { state.branchPricesOk = /item_branch_prices|relation|schema cache/i.test(error.message || '') ? false : state.branchPricesOk; }
+      (data || []).forEach(r => { state.itemBP.rows[r.branch_id] = { price: r.price ?? '', price2: r.price2 ?? '', price3: r.price3 ?? '' }; });
+      state.itemBP.loading = false; render();
+    });
+  }
+  const rows = state.itemBP.rows;
+  const inp = (bid, k) => `<input data-bp-branch="${bid}" data-bp-key="${k}" class="input mono" style="padding:4px 6px;" placeholder="العام" value="${escapeHtml(String(rows[bid]?.[k] ?? ''))}" />`;
+  return `
+    <div style="grid-column:1/-1;border:1px solid #DCE3EE;background:#F6F8FB;border-radius:10px;padding:10px 12px;">
+      <div style="font-size:12px;font-weight:700;color:#1B3352;margin-bottom:4px;"><i class="ti ti-building-store"></i> سعر خاص لكل فرع</div>
+      <div style="font-size:10.5px;color:#6E6D5F;margin-bottom:8px;">اتركه فاضي عشان الفرع ياخد السعر العام. الفرع الرئيسي يبيع بالسعر العام دايماً.</div>
+      ${state.itemBP.loading ? '<div style="font-size:11.5px;color:#8B8A7A;">جاري التحميل…</div>' : `
+      <div style="display:grid;grid-template-columns:1.2fr 1fr 1fr 1fr;gap:6px;align-items:center;font-size:11.5px;">
+        <div style="color:#6E6D5F;">الفرع</div><div style="color:#6E6D5F;">سعر 1</div><div style="color:#6E6D5F;">سعر 2</div><div style="color:#6E6D5F;">سعر 3</div>
+        ${brs.map(b => `<div style="font-weight:600;">${escapeHtml(b.name)}</div>${inp(b.id, 'price')}${inp(b.id, 'price2')}${inp(b.id, 'price3')}`).join('')}
+      </div>`}
+    </div>`;
+}
+async function saveItemBranchPrices(itemId) {
+  const bp = state.itemBP;
+  if (!bp || !itemId || state.branchPricesOk === false || bp.loading) return;
+  if (bp.forId !== itemId && bp.forId !== 'new') return;
+  const ups = [], dels = [];
+  Object.entries(bp.rows).forEach(([bid, r]) => {
+    const n = v => (v === '' || v == null || isNaN(Number(v)) || Number(v) <= 0) ? null : Number(v);
+    const row = { item_id: itemId, branch_id: bid, price: n(r.price), price2: n(r.price2), price3: n(r.price3), updated_at: new Date().toISOString() };
+    if (row.price == null && row.price2 == null && row.price3 == null) dels.push(bid); else ups.push(row);
+  });
+  if (ups.length) { const { error } = await sb.from('item_branch_prices').upsert(ups, { onConflict: 'item_id,branch_id' }); if (error) showToast('فشل حفظ أسعار الفروع: ' + error.message, 'error'); }
+  if (dels.length) await sb.from('item_branch_prices').delete().eq('item_id', itemId).in('branch_id', dels);
+  bp.forId = itemId;
+  await loadBranchPrices();
+}
 function getItemPriceForCustomer(item, customerId) {
   if (!item) return '';
   const customer = customerId ? state.parties.find(p => p.id === customerId) : null;
   const level = customer ? customer.price_level : null;
-  if (level === 'سعر2' && item.price2) return item.price2;
-  if (level === 'سعر3' && item.price3) return item.price3;
-  return item.price || '';
+  if (level === 'سعر2' && Number(bprice(item, 'price2')) > 0) return bprice(item, 'price2');
+  if (level === 'سعر3' && Number(bprice(item, 'price3')) > 0) return bprice(item, 'price3');
+  return bprice(item, 'price') || '';
 }
 
 function wireItemPickBehavior(selectId, infoId, qtyId, priceId, priceKey) {
@@ -10957,10 +11189,10 @@ function wireItemPickBehavior(selectId, infoId, qtyId, priceId, priceKey) {
         info.innerHTML = `<b>${escapeHtml(item.name)}</b> — <span class="mono">${escapeHtml(item.sku)}</span>`
           + ` &nbsp;·&nbsp; الرصيد الحالي: <span class="mono">${item.qty}</span>`
           + (isAdmin() ? ` &nbsp;·&nbsp; التكلفة: <span class="mono">${fmt(item.cost)}</span>` : '')
-          + ` &nbsp;·&nbsp; سعر البيع: <span class="mono">${fmt(item.price)}</span>`;
+          + ` &nbsp;·&nbsp; سعر البيع: <span class="mono">${fmt(bprice(item, 'price'))}</span>`;
       }
       const priceEl = priceId ? document.getElementById(priceId) : null;
-      if (priceEl && !priceEl.value && priceKey) priceEl.value = item[priceKey] || '';
+      if (priceEl && !priceEl.value && priceKey) priceEl.value = (/^price[23]?$/.test(priceKey) ? bprice(item, priceKey) : item[priceKey]) || '';
       state.activeBarItemId = item.id;
       const bar = document.getElementById('active-item-bar');
       if (bar) bar.outerHTML = renderActiveItemBar(); else { document.body.insertAdjacentHTML('beforeend', renderActiveItemBar()); bindActiveItemBar(); }
@@ -12153,7 +12385,7 @@ async function loadChartOfAccounts() {
   state.chartOfAccounts = data || [];
 }
 async function loadJournalEntries() {
-  let q = sb.from('journal_entries').select('*, journal_entry_lines(account_code, debit, credit, description)').order('entry_date', { ascending: false }).order('created_at', { ascending: false });
+  let q = brq(sb.from('journal_entries').select('*, journal_entry_lines(account_code, debit, credit, description)')).order('entry_date', { ascending: false }).order('created_at', { ascending: false });
   if (state.journalFrom) q = q.gte('entry_date', state.journalFrom);
   if (state.journalTo) q = q.lte('entry_date', state.journalTo);
   const { data } = await q;
@@ -12161,7 +12393,7 @@ async function loadJournalEntries() {
 }
 // ---------- قائمة الدخل (الأرباح والخسائر) ----------
 async function loadIncomeStatement() {
-  let q = sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date, source_type)').neq('journal_entries.source_type', 'closing');
+  let q = brq(sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date, source_type)')).neq('journal_entries.source_type', 'closing');
   if (state.incomeStatementFrom) q = q.gte('journal_entries.entry_date', state.incomeStatementFrom);
   if (state.incomeStatementTo) q = q.lte('journal_entries.entry_date', state.incomeStatementTo);
   const { data } = await q;
@@ -12223,7 +12455,7 @@ async function loadIncomeStatement() {
 // ---------- قائمة المركز المالي (الميزانية) ----------
 async function loadBalanceSheet() {
   const asOf = state.balanceSheetAsOf;
-  let q = sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date)');
+  let q = brq(sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date)'));
   if (asOf) q = q.lte('journal_entries.entry_date', asOf);
   const { data } = await q;
   const byAccount = {};
@@ -12445,11 +12677,22 @@ async function loadAlerts() {
   const today = new Date().toISOString().slice(0,10);
 
   // 1) أصناف نفدت أو وصلت حد الطلب
-  const lowStock = state.items.filter(it => it.active !== false && Number(it.qty||0) <= Number(it.reorder_at||0));
-  const outOfStock = lowStock.filter(it => Number(it.qty||0) <= 0);
+  // بفرع العمل: الكمية = رصيد مستودعات الفرع
+  const [outOfStock, nearLow] = withBranchQty(() => { const low = state.items.filter(it => it.active !== false && Number(it.qty||0) <= Number(it.reorder_at||0)); return [low.filter(it => Number(it.qty||0) <= 0), low.filter(it => Number(it.qty||0) > 0)]; });
   if (outOfStock.length > 0) alerts.push({ severity:'high', text:`${outOfStock.length} صنف نفد من المخزون تماماً`, target:'الاصناف' });
-  const nearLow = lowStock.filter(it => Number(it.qty||0) > 0);
   if (nearLow.length > 0) alerts.push({ severity:'medium', text:`${nearLow.length} صنف وصل لحد إعادة الطلب`, target:'الاصناف' });
+
+  // طلبات بضاعة من فروع أخرى / تحويلات بالطريق لفرعي
+  if (state.branchesReady && (state.branches || []).length > 1) {
+    try {
+      if (!state.transfers || !state.transfers.length) await loadTransfers();
+      const ub = userBranchId();
+      const reqs = (state.transfers || []).filter(x => trStatusOf(x) === 'مطلوب' && (ub ? x.from?.branch_id === ub : canApprove())).length;
+      if (reqs) alerts.push({ severity: 'high', text: `${reqs} طلب بضاعة من فروع أخرى بانتظار موافقتك`, target: '__transfers_reqs__' });
+      const inbound = (state.transfers || []).filter(x => trStatusOf(x) === 'مرسل' && (!ub || x.to?.branch_id === ub)).length;
+      if (inbound) alerts.push({ severity: 'medium', text: `${inbound} تحويل بضاعة بالطريق بانتظار الاستلام`, target: '__transfers_inbound__' });
+    } catch (e) { /* تجاهل */ }
+  }
 
   // 2) عملاء متأخرين أكثر من 90 يوم (يستخدم نفس منطق كشف أعمار الذمم)
   const customers = state.parties.filter(p => p.party_type === 'customer' && Number(p.balance||0) > 0);
@@ -12735,7 +12978,7 @@ async function loadReportTemplates() {
 }
 
 async function loadGeneralLedger() {
-  let q = sb.from('journal_entry_lines').select('account_code, debit, credit, description, journal_entries!inner(entry_date, entry_number, description)');
+  let q = brq(sb.from('journal_entry_lines').select('account_code, debit, credit, description, journal_entries!inner(entry_date, entry_number, description)'));
   if (state.generalLedgerFrom) q = q.gte('journal_entries.entry_date', state.generalLedgerFrom);
   if (state.generalLedgerTo) q = q.lte('journal_entries.entry_date', state.generalLedgerTo);
   const { data } = await q;
@@ -12761,7 +13004,7 @@ async function loadGeneralLedger() {
 async function loadAccountStatement() {
   if (!state.accountStatementCode) { state.accountStatementRows = []; return; }
   await loadUsers();
-  let q = sb.from('journal_entry_lines').select('account_code, debit, credit, description, journal_entries!inner(entry_date, entry_number, description, voucher_number, source_type, source_id, created_by, created_at)').eq('account_code', state.accountStatementCode);
+  let q = brq(sb.from('journal_entry_lines').select('account_code, debit, credit, description, journal_entries!inner(entry_date, entry_number, description, voucher_number, source_type, source_id, created_by, created_at)')).eq('account_code', state.accountStatementCode);
   if (state.accountStatementFrom) q = q.gte('journal_entries.entry_date', state.accountStatementFrom);
   if (state.accountStatementTo) q = q.lte('journal_entries.entry_date', state.accountStatementTo);
   const { data } = await q;
@@ -12804,7 +13047,7 @@ async function loadAccountStatement() {
 }
 
 async function loadTrialBalance() {
-  let q = sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date)');
+  let q = brq(sb.from('journal_entry_lines').select('account_code, debit, credit, journal_entries!inner(entry_date)'));
   if (state.trialBalanceFrom) q = q.gte('journal_entries.entry_date', state.trialBalanceFrom);
   if (state.trialBalanceTo) q = q.lte('journal_entries.entry_date', state.trialBalanceTo);
   const { data } = await q;
@@ -13019,7 +13262,7 @@ function normalizePhone(raw) {
 // رصيد العميل من القيود المحاسبية (مدين − دائن على حسابه)
 async function partyGLBalance(partyId, partyType) {
   const code = getPartyAccountCode(partyId, partyType);
-  const { data } = await sb.from('journal_entry_lines').select('debit, credit').eq('account_code', code);
+  const { data } = await brq(sb.from('journal_entry_lines').select('debit, credit')).eq('account_code', code);
   return (data || []).reduce((s, l) => s + Number(l.debit || 0) - Number(l.credit || 0), 0);
 }
 // ---------- واتساب: إرسال الفاتورة كملف PDF أو صورة ----------
@@ -13861,7 +14104,7 @@ function bindAppEvents() {
           const item = state.items.find(it => it.id === id);
           if (!item) continue;
           if (targetForm.lines.some(l => l.item_id === id)) continue; // ما نكرر صنف مضاف أصلاً
-          const priceVal = ctx.priceKey ? Number(item[ctx.priceKey]) || 0 : Number(item.price) || 0;
+          const priceVal = ctx.priceKey && !/^price[23]?$/.test(ctx.priceKey) ? Number(item[ctx.priceKey]) || 0 : Number(bprice(item, ctx.priceKey || 'price')) || 0;
           targetForm.lines.push({ item_id:item.id, item_name:item.name, sku:item.sku, unit:item.unit, quantity:1, unit_price:priceVal, tax_percent:15 });
           added++;
         }
@@ -13959,6 +14202,10 @@ function bindAppEvents() {
     el.onclick = async () => {
       state.showAlertsPanel = false;
       const target = el.dataset.alertTarget;
+      if (target === '__transfers_reqs__' || target === '__transfers_inbound__') {
+        await loadTransfers(); state.transferFilterStatus = target === '__transfers_reqs__' ? 'مطلوب' : 'مرسل';
+        state.activeSection = '__transfers__'; render(); return;
+      }
       if (target === '__aging_report__') {
         await loadParties();
         state.agingAsOf = new Date().toISOString().slice(0,10);
@@ -14001,6 +14248,7 @@ function bindAppEvents() {
       const target = el.dataset.homeShortcut;
       if (target === '__quotations__') { await loadParties(); await loadQuotations(); state.activeSection = '__quotations__'; render(); return; }
       if (target === '__owner_dash__') { openOwnerDash(); return; }
+      if (target === '__branch_compare__') { openBranchCompare(); return; }
       if (target === '__shift__') { openShiftModal(); return; }
       if (target === '__quick_open__') {
         state.quickOpenType = 'فاتورة بيع'; state.quickOpenNumber = ''; state.quickOpenError = '';
@@ -15255,8 +15503,8 @@ function bindAppEvents() {
         errEl.textContent = '';
         if (!itemId || !qty || qty<=0 || isNaN(price) || price<0) { alert('اختر صنف وأدخل كمية وسعر صحيح'); return; }
         const item = state.items.find(it => it.id === itemId);
-        if (qty > Number(item.qty || 0) && !feat('allow_negative_stock')) {
-          errEl.textContent = `الكمية أكبر من الرصيد المتوفر (${item.qty})`;
+        if (qty > itemQtyForUser(item) && !feat('allow_negative_stock')) {
+          errEl.textContent = `الكمية أكبر من الرصيد المتوفر (${itemQtyForUser(item)})`;
           return;
         }
         if (price < Number(item.cost || 0) && !feat('allow_below_cost')) {
@@ -16679,6 +16927,13 @@ function bindAppEvents() {
     trf('tr-f-status', 'transferFilterStatus'); trf('tr-f-from', 'transferFilterFrom'); trf('tr-f-to', 'transferFilterTo');
     if (document.getElementById('tr-f-clear')) document.getElementById('tr-f-clear').onclick = () => { state.transferFilterStatus = ''; state.transferFilterFrom = ''; state.transferFilterTo = ''; render(); };
     if (document.getElementById('tr-show-pending')) document.getElementById('tr-show-pending').onclick = () => { state.transferFilterStatus = 'مرسل'; render(); };
+    if (document.getElementById('tr-show-reqs')) document.getElementById('tr-show-reqs').onclick = () => { state.transferFilterStatus = 'مطلوب'; render(); };
+    if (document.getElementById('new-tr-req-btn')) document.getElementById('new-tr-req-btn').onclick = async () => {
+      // نحتاج أرصدة كل المستودعات عشان نعرض المتوفر عند الفرع التاني
+      state.transferForm = { ...newTransferForm(), is_request: true, from_warehouse_id: '', to_warehouse_id: defaultWarehouseId() };
+      state.transferForm.transfer_number = nextDocNumber(state.transfers, 'transfer_number', 'WT', 4);
+      state.editingTransferId = null; state.showTransferForm = true; render();
+    };
     if (document.getElementById('tr-f-excel')) document.getElementById('tr-f-excel').onclick = async () => {
       const list = filteredTransfers();
       if (!list.length) { showToast('ما فيه سندات للتصدير', 'error'); return; }
@@ -16736,7 +16991,7 @@ function bindAppEvents() {
         if (!state.transferForm.from_warehouse_id) { alert('اختر المستودع المرسِل أول'); return; }
         const have = await trStockIn(itemId, state.transferForm.from_warehouse_id);
         const used = state.transferForm.lines.filter(l => l.item_id === itemId).reduce((s2, l) => s2 + Number(l.quantity), 0);
-        if (qty + used > have) { alert(`رصيد "${item.name}" بالمستودع المرسِل غير كافي — المتوفر ${have - used}`); return; }
+        if (!state.transferForm.is_request && qty + used > have) { alert(`رصيد "${item.name}" بالمستودع المرسِل غير كافي — المتوفر ${have - used}`); return; }
         const existingLine = state.transferForm.lines.find(l => l.item_id === itemId);
         if (existingLine) { existingLine.quantity += qty; }
         else { state.transferForm.lines.push({ item_id:itemId, item_name:item.name, sku:item.sku, unit:item.unit, quantity:qty }); }
@@ -16752,6 +17007,18 @@ function bindAppEvents() {
         if (f.lines.length === 0) { alert('أضف صنف واحد على الأقل'); return; }
         const headerPayload = { from_warehouse_id:f.from_warehouse_id, to_warehouse_id:f.to_warehouse_id, transfer_date:f.transfer_date, notes:f.notes||null };
         const lineRows = f.lines.map(l => ({ item_id:l.item_id, quantity:l.quantity }));
+        if (f.is_request && !state.editingTransferId) {
+          // طلب بضاعة: يتسجل باسم الفرع الطالب، وحالته «مطلوب» لحد ما الفرع المرسِل يوافق
+          const ub = userBranchId() || warehouseBranchId(f.to_warehouse_id);
+          const { data, error } = await sb.from('warehouse_transfers').insert({ transfer_number: nextDocNumber(state.transfers, 'transfer_number'), ...headerPayload, status: 'مطلوب', branch_id: ub, requested_by: state.session.user.id, requested_at: new Date().toISOString(), created_by: state.session.user.id }).select().single();
+          if (error) { alert(/requested_|status/.test(error.message) ? 'شغّل ملف 21 في قاعدة البيانات أولاً' : 'خطأ بالحفظ:\n' + error.message); return; }
+          const { error: le } = await sb.from('warehouse_transfer_items').insert(lineRows.map(l => ({ ...l, transfer_id: data.id })));
+          if (le) { await sb.from('warehouse_transfers').delete().eq('id', data.id); alert('خطأ بحفظ الأصناف:\n' + le.message); return; }
+          logActivity('طلب بضاعة من فرع', `${data.transfer_number} ← ${branchName(warehouseBranchId(f.from_warehouse_id))}`);
+          showToast('تم إرسال الطلب 📨 — بانتظار موافقة الفرع');
+          await loadTransfers(); await openTransferById(data.id);
+          return;
+        }
         if (state.editingTransferId) {
           const { error } = await sb.from('warehouse_transfers').update(headerPayload).eq('id', state.editingTransferId);
           if (error) { alert('خطأ بالحفظ:\n'+error.message); return; }
@@ -16800,6 +17067,28 @@ function bindAppEvents() {
         render();
       };
     }
+    if (document.getElementById('tr-req-approve')) document.getElementById('tr-req-approve').onclick = async () => {
+      const lines = [...document.querySelectorAll('[data-tr-reqqty]')].map(inp => ({ item_id: inp.dataset.trReqqty, quantity: Number(inp.value) }));
+      if (lines.some(l => isNaN(l.quantity) || l.quantity < 0)) { alert('الكميات لازم تكون أرقام صحيحة'); return; }
+      if (!lines.some(l => l.quantity > 0)) { alert('ما فيه أي كمية للإرسال — لو ما متوفر شي اضغط «رفض الطلب»'); return; }
+      if (!confirm('موافقة على الطلب وإرسال البضاعة؟\n\nالكمية تنقص من مستودعك الآن، وتنزل عند الفرع الطالب بعد ما يأكد الاستلام.')) return;
+      const { data: res, error } = await sb.rpc('transfer_request_approve', { p_id: state.editingTransferId, p_lines: lines });
+      if (error) { alert('تعذّر الإرسال:\n' + error.message); return; }
+      showToast(res === 'مرسل' ? 'تم الإرسال 🚚 — بانتظار استلام الفرع' : 'تم ✓');
+      logActivity('موافقة على طلب بضاعة', state.transferForm.transfer_number);
+      await loadTransfers(); await loadWarehouseStockMap(); await openTransferById(state.editingTransferId);
+    };
+    const rejectReq = async (isCancel) => {
+      const reason = isCancel ? 'ألغاه الفرع الطالب' : prompt('سبب الرفض (اختياري):', 'غير متوفر');
+      if (reason === null) return;
+      if (isCancel && !confirm('إلغاء الطلب؟')) return;
+      const { error } = await sb.rpc('transfer_request_reject', { p_id: state.editingTransferId, p_reason: reason });
+      if (error) { alert('تعذّر:\n' + error.message); return; }
+      logActivity(isCancel ? 'إلغاء طلب بضاعة' : 'رفض طلب بضاعة', state.transferForm.transfer_number);
+      await loadTransfers(); await openTransferById(state.editingTransferId);
+    };
+    if (document.getElementById('tr-req-reject')) document.getElementById('tr-req-reject').onclick = () => rejectReq(false);
+    if (document.getElementById('tr-req-cancel')) document.getElementById('tr-req-cancel').onclick = () => rejectReq(true);
     if (document.getElementById('tr-receive')) {
       document.getElementById('tr-receive').onclick = async () => {
         const f = state.transferForm;
@@ -19728,7 +20017,12 @@ function bindAppEvents() {
       const actual = Number(state.cashReconActual);
       const diff = actual - state.cashReconExpected;
       const notes = document.getElementById('cr-notes').value.trim() || null;
-      await sb.from('cash_reconciliations').upsert({ recon_date: today, expected_cash: state.cashReconExpected, actual_cash: actual, difference: diff, notes, created_by: state.session.user.id }, { onConflict: 'recon_date' });
+      const crRow = { recon_date: today, expected_cash: state.cashReconExpected, actual_cash: actual, difference: diff, notes, created_by: state.session.user.id };
+      // بعد ملف 21: تطابق لكل فرع في اليوم
+      const { error: crErr } = state.jeBranchCol
+        ? await sb.from('cash_reconciliations').upsert({ ...crRow, branch_id: userBranchId() || mainBranchId() }, { onConflict: 'recon_date,branch_id' })
+        : await sb.from('cash_reconciliations').upsert(crRow, { onConflict: 'recon_date' });
+      if (crErr) { alert('خطأ بالحفظ:\n' + crErr.message); return; }
       await loadCashReconciliations();
       showToast('تم حفظ تطابق اليوم');
       render();
@@ -20822,6 +21116,7 @@ function bindAppEvents() {
         }
         await loadItems();
       }
+      await saveItemBranchPrices(state.editingId);
       // نخلي النافذة مفتوحة بعد الحفظ عشان تقدر تكمل بقية التبويبات (تجميع، إحصائيات، علاقات، صور)
       render();
     };
@@ -20833,10 +21128,10 @@ function bindAppEvents() {
 // نفس قائمة الجداول المستخدمة بزر "تحميل نسخة احتياطية تامة" اليدوي — نعيد استخدامها للنسخة التلقائية
 const BACKUP_TABLE_ORDER = [
   // الإعدادات والتعريفات
-  'company_settings','license_settings','backup_settings','payment_methods','chart_of_accounts','warehouses','report_templates',
+  'company_settings','license_settings','backup_settings','payment_methods','chart_of_accounts','branches','warehouses','report_templates',
   'profiles','permission_roles','permission_screens','role_permissions','user_permissions','info_panel_fields','role_info_panel_fields','user_info_panel_fields',
   // الأصناف والأطراف
-  'items','item_alternative_numbers','item_vehicle_compatibility','item_relations','item_bundle_components','item_warehouse_stock','parties',
+  'items','item_alternative_numbers','item_vehicle_compatibility','item_relations','item_bundle_components','item_warehouse_stock','item_branch_prices','parties',
   // المستندات
   'quotations','quotation_items',
   'purchase_invoices','purchase_invoice_items','sales_invoices','sales_invoice_items',
@@ -20914,24 +21209,24 @@ async function checkAndRunAutoBackup() {
 async function calcExpectedCashToday() {
   const today = new Date().toISOString().slice(0,10);
   let expected = 0;
-  const { data: sales } = await sb.from('sales_invoices').select('paid_amount').eq('approved', true).eq('invoice_type', 'نقدي').eq('invoice_date', today);
+  const { data: sales } = await brq(sb.from('sales_invoices').select('paid_amount')).eq('approved', true).eq('invoice_type', 'نقدي').eq('invoice_date', today);
   (sales||[]).forEach(r => { expected += Number(r.paid_amount||0); });
-  const { data: purch } = await sb.from('purchase_invoices').select('paid_amount').eq('approved', true).eq('invoice_type', 'نقدي').eq('invoice_date', today);
+  const { data: purch } = await brq(sb.from('purchase_invoices').select('paid_amount')).eq('approved', true).eq('invoice_type', 'نقدي').eq('invoice_date', today);
   (purch||[]).forEach(r => { expected -= Number(r.paid_amount||0); });
-  const { data: sret } = await sb.from('sales_returns').select('total').eq('approved', true).eq('payment_method', 'نقدي').eq('return_date', today);
+  const { data: sret } = await brq(sb.from('sales_returns').select('total')).eq('approved', true).eq('payment_method', 'نقدي').eq('return_date', today);
   (sret||[]).forEach(r => { expected -= Number(r.total||0); });
-  const { data: pret } = await sb.from('purchase_returns').select('total').eq('approved', true).eq('payment_method', 'نقدي').eq('return_date', today);
+  const { data: pret } = await brq(sb.from('purchase_returns').select('total')).eq('approved', true).eq('payment_method', 'نقدي').eq('return_date', today);
   (pret||[]).forEach(r => { expected += Number(r.total||0); });
-  const { data: rec } = await sb.from('receipt_vouchers').select('amount').eq('approved', true).eq('payment_method', 'نقدي').eq('voucher_date', today);
+  const { data: rec } = await brq(sb.from('receipt_vouchers').select('amount')).eq('approved', true).eq('payment_method', 'نقدي').eq('voucher_date', today);
   (rec||[]).forEach(r => { expected += Number(r.amount||0); });
-  const { data: pay } = await sb.from('payment_vouchers').select('amount').eq('approved', true).eq('payment_method', 'نقدي').eq('voucher_date', today);
+  const { data: pay } = await brq(sb.from('payment_vouchers').select('amount')).eq('approved', true).eq('payment_method', 'نقدي').eq('voucher_date', today);
   (pay||[]).forEach(r => { expected -= Number(r.amount||0); });
-  const { data: cd } = await sb.from('cash_disbursement_vouchers').select('amount, payment_method').eq('approved', true).eq('voucher_date', today);
+  const { data: cd } = await brq(sb.from('cash_disbursement_vouchers').select('amount, payment_method')).eq('approved', true).eq('voucher_date', today);
   (cd||[]).forEach(r => { if (r.payment_method==='نقدي') expected -= Number(r.amount||0); });
   return expected;
 }
 async function loadCashReconciliations() {
-  const { data } = await sb.from('cash_reconciliations').select('*').order('recon_date', { ascending: false }).limit(15);
+  const { data } = await brq(sb.from('cash_reconciliations').select('*')).order('recon_date', { ascending: false }).limit(15);
   state.cashReconciliations = data || [];
 }
 
