@@ -1126,6 +1126,7 @@ function bindAuthEvents() {
       await loadSalesInvoices();
       await loadWarehouses();
       await loadPaymentMethods();
+      if (branchPickNeeded()) { state.branchPickOpen = true; state.branchPickClosable = false; }
       logActivity('تسجيل دخول');
       loadAlerts().then(() => render()); // بالخلفية، ما نوقف تسجيل الدخول لحد ما يخلص
     } catch (e) {
@@ -2027,7 +2028,87 @@ async function loadBranches() {
   state.branchesReady = !error;
   state.branchesTried = true;
 }
-function userBranchId() { return (state.profile && state.profile.branch_id && state.branchesReady) ? state.profile.branch_id : null; }
+// الفروع اللي يقدر المستخدم يشتغل فيها: المدير (أو غير المربوط بفرع) = كل الفروع، والموظف = فرعه + الفروع الإضافية المسموحة
+function branchOptions() {
+  if (!state.profile || !state.branchesReady) return [];
+  const act = (state.branches || []).filter(b => b.active !== false);
+  if (canAllBranches()) return act;
+  const extra = Array.isArray(state.profile.allowed_branches) ? state.profile.allowed_branches : [];
+  return act.filter(b => b.id === state.profile.branch_id || extra.includes(b.id));
+}
+function canAllBranches() {
+  const p = state.profile; if (!p) return false;
+  return isAdmin() || (!p.branch_id && !(Array.isArray(p.allowed_branches) && p.allowed_branches.length));
+}
+// فرع العمل الحالي (اللي اختاره عند الدخول). null = كل الفروع
+function userBranchId() {
+  if (!state.profile || !state.branchesReady) return null;
+  const a = state.profile.active_branch_id;
+  if (a && branchOptions().some(b => b.id === a)) return a;
+  if (canAllBranches()) return null;
+  return state.profile.branch_id || branchOptions()[0]?.id || null;
+}
+function branchPickNeeded() { return (state.branches || []).filter(b => b.active !== false).length > 1 && branchOptions().length > 1; }
+async function chooseWorkingBranch(id) {
+  id = id || null;
+  const { error } = await sb.rpc('set_active_branch', { p_branch: id });
+  if (error && !/set_active_branch|function|schema cache/i.test(error.message || '')) { showToast(error.message, 'error'); return; }
+  state.profile.active_branch_id = id;
+  state.branchPickOpen = false;
+  // كل شي يتبع الفرع الجديد: العملاء والموردين، المستودعات والأرصدة، المستندات
+  state.showForm = false; state.partyBranchFilter = '';
+  state.activeSection = 'الرئيسية';
+  await loadParties();
+  await loadWarehouseStockMap();
+  state.homeCogs = null;
+  showToast(id ? `تشتغل الآن في: ${branchName(id)}` : 'تشتغل الآن على كل الفروع', 'success');
+  render();
+}
+function renderBranchPicker() {
+  const opts = branchOptions(), cur = userBranchId();
+  const canClose = !!state.branchPickClosable;
+  return `
+  <div class="no-print" style="position:fixed;inset:0;background:rgba(15,30,50,0.55);z-index:900;display:flex;align-items:center;justify-content:center;padding:16px;">
+    <div style="background:#fff;border-radius:14px;box-shadow:0 20px 50px rgba(0,0,0,0.35);width:100%;max-width:440px;overflow:hidden;">
+      <div style="background:linear-gradient(135deg,#1B3352,#2C4A6E);color:#fff;padding:18px 20px;display:flex;align-items:center;gap:10px;">
+        <i class="ti ti-building-store" style="font-size:26px;"></i>
+        <div style="flex:1;"><div style="font-weight:700;font-size:16px;">اختار الفرع</div><div style="font-size:12px;opacity:.85;">الفرع اللي حتشتغل عليه الآن</div></div>
+        ${canClose ? `<button data-branch-pick-close style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;"><i class="ti ti-x"></i></button>` : ''}
+      </div>
+      <div style="padding:14px;display:flex;flex-direction:column;gap:8px;max-height:60vh;overflow-y:auto;">
+        ${opts.map(b => `
+          <button data-pick-branch="${b.id}" style="display:flex;align-items:center;gap:12px;padding:13px 14px;border:2px solid ${cur === b.id ? '#2C4A6E' : '#E4E2DA'};background:${cur === b.id ? '#EEF3F9' : '#fff'};border-radius:10px;cursor:pointer;text-align:right;font-family:inherit;">
+            <span style="width:38px;height:38px;border-radius:10px;background:${b.is_main ? '#BA7517' : '#2C4A6E'};color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;">${b.is_main ? '<i class="ti ti-star"></i>' : escapeHtml(b.doc_prefix || '•')}</span>
+            <span style="flex:1;"><span style="display:block;font-weight:700;font-size:14px;color:#1B3352;">${escapeHtml(b.name)}</span>
+              <span style="display:block;font-size:11.5px;color:#6E6D5F;">${b.is_main ? 'الفرع الرئيسي' : 'فرع'}${b.address ? ' · ' + escapeHtml(b.address) : ''}</span></span>
+            ${cur === b.id ? '<i class="ti ti-circle-check" style="color:#2C4A6E;font-size:20px;"></i>' : ''}
+          </button>`).join('')}
+        ${canAllBranches() ? `
+          <button data-pick-branch="" style="display:flex;align-items:center;gap:12px;padding:13px 14px;border:2px dashed ${cur === null ? '#2C4A6E' : '#C9C5B5'};background:${cur === null ? '#EEF3F9' : '#FAF9F5'};border-radius:10px;cursor:pointer;text-align:right;font-family:inherit;">
+            <span style="width:38px;height:38px;border-radius:10px;background:#5B6B7F;color:#fff;display:flex;align-items:center;justify-content:center;"><i class="ti ti-layout-grid"></i></span>
+            <span style="flex:1;"><span style="display:block;font-weight:700;font-size:14px;color:#1B3352;">كل الفروع</span>
+              <span style="display:block;font-size:11.5px;color:#6E6D5F;">للمتابعة والتقارير — المستندات الجديدة حسب المستودع المختار</span></span>
+            ${cur === null ? '<i class="ti ti-circle-check" style="color:#2C4A6E;font-size:20px;"></i>' : ''}
+          </button>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+function branchChip() {
+  if ((state.branches || []).filter(b => b.active !== false).length < 2 || !state.profile) return '';
+  const cur = userBranchId(), can = branchOptions().length > 1;
+  return `<button ${can ? 'data-branch-chip' : 'disabled'} title="${can ? 'تغيير الفرع' : 'فرعك'}" style="margin-right:12px;background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.35);color:#fff;border-radius:999px;padding:2px 12px;font-size:12px;cursor:${can ? 'pointer' : 'default'};font-family:inherit;">📍 ${escapeHtml(cur ? branchName(cur) : 'كل الفروع')}${can ? ' <i class="ti ti-chevron-down" style="font-size:11px;"></i>' : ''}</button>`;
+}
+function installBranchPickDelegation() {
+  if (window.__brPickInstalled) return; window.__brPickInstalled = true;
+  document.addEventListener('click', e => {
+    const pick = e.target.closest('[data-pick-branch]');
+    if (pick) { chooseWorkingBranch(pick.dataset.pickBranch); return; }
+    if (e.target.closest('[data-branch-chip]')) { state.branchPickOpen = true; state.branchPickClosable = true; render(); return; }
+    if (e.target.closest('[data-branch-pick-close]')) { state.branchPickOpen = false; render(); }
+  });
+}
+installBranchPickDelegation();
 function isBranchUser() { return !!userBranchId(); }
 function branchName(id) { return (state.branches || []).find(b => b.id === id)?.name || ''; }
 function warehouseBranchId(whId) { return state.warehouses.find(w => w.id === whId)?.branch_id || null; }
@@ -2534,7 +2615,7 @@ function renderApp() {
     </div>` : ''}
     <div style="border:1px solid #1B3352;border-radius:4px;box-shadow:0 6px 24px rgba(0,0,0,0.35);flex:1;display:flex;flex-direction:column;">
       <div class="win-title" style="border-radius:4px 4px 0 0;">
-        <span><img src="icon-192.png" style="height:20px;width:20px;vertical-align:middle;margin-left:8px;border-radius:5px;" onerror="this.style.display='none'" />Coin Soft ERP</span>
+        <span><img src="icon-192.png" style="height:20px;width:20px;vertical-align:middle;margin-left:8px;border-radius:5px;" onerror="this.style.display='none'" />Coin Soft ERP${branchChip()}</span>
       </div>
       <div style="background:#fff;border-bottom:1px solid #A9A48C;display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:0 8px;position:relative;">
         <div style="padding:0 4px;">${langToggleBtn(false)}</div>
@@ -2584,6 +2665,7 @@ function renderApp() {
   </div>
   ${state.showForm ? renderFormModal() : ''}
   ${state.showUsers ? renderUsersModal() : ''}
+  ${state.branchPickOpen ? renderBranchPicker() : ''}
   ${state.showActivityLog ? renderActivityLogModal() : ''}
   ${state.showPartiesReport ? renderPartiesReportModal() : ''}
   ${state.showAgingReport ? renderAgingReportModal() : ''}
@@ -10475,8 +10557,12 @@ function renderUsersModal() {
                 <option value="">كل الفروع</option>
                 ${state.branches.map(b => `<option value="${b.id}" ${u.branch_id === b.id ? 'selected' : ''}>${escapeHtml(b.name)}</option>`).join('')}
               </select>
-              <span style="color:#8B8A7A;">${u.branch_id ? 'يبيع ويشوف رصيد فرعه فقط' : 'يشوف كل الفروع'}</span>
-            </div>` : ''}
+              <span style="color:#8B8A7A;">${u.role === 'admin' || u.is_support ? 'المدير يختار أي فرع عند الدخول' : u.branch_id ? ((u.allowed_branches || []).length ? 'يختار الفرع عند الدخول' : 'يدخل على فرعه مباشرة') : 'يشوف كل الفروع'}</span>
+            </div>
+            ${u.branch_id && u.role !== 'admin' && !u.is_support && state.branches.filter(b => b.id !== u.branch_id && b.active !== false).length ? `<div style="padding:0 8px 8px;display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;font-size:11.5px;color:#1B3352;">
+              <span style="font-weight:500;"><i class="ti ti-arrows-exchange"></i> فروع إضافية يقدر يشتغل فيها:</span>
+              ${state.branches.filter(b => b.id !== u.branch_id && b.active !== false).map(b => `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" data-allow-branch="${b.id}" data-allow-user="${u.id}" ${(u.allowed_branches || []).includes(b.id) ? 'checked' : ''} /> ${escapeHtml(b.name)}</label>`).join('')}
+            </div>` : ''}` : ''}
             </fieldset>
             </div>`).join('')}
         </div>
@@ -14424,6 +14510,7 @@ function bindAppEvents() {
         await sb.auth.signOut();
         state.session = null;
         state.profile = null;
+        state.branchPickOpen = false;
         render();
         return;
       }
@@ -20353,6 +20440,17 @@ function bindAppEvents() {
         }
       };
     });
+    document.querySelectorAll('[data-allow-branch]').forEach(chk => {
+      chk.onchange = async () => {
+        const u = state.users.find(x => x.id === chk.dataset.allowUser); if (!u) return;
+        let list = Array.isArray(u.allowed_branches) ? [...u.allowed_branches] : [];
+        list = chk.checked ? [...new Set([...list, chk.dataset.allowBranch])] : list.filter(id => id !== chk.dataset.allowBranch);
+        const { error } = await sb.from('profiles').update({ allowed_branches: list }).eq('id', u.id);
+        if (error) { showToast(/allowed_branches/.test(error.message) ? 'شغّل ملف 20 في قاعدة البيانات أولاً' : 'فشل الحفظ: ' + error.message, 'error'); chk.checked = !chk.checked; return; }
+        logActivity('فروع إضافية لمستخدم', `${u.username || ''} ${chk.checked ? '+' : '-'} ${branchName(chk.dataset.allowBranch)}`);
+        showToast('تم ✓'); await loadUsers(); render();
+      };
+    });
     document.querySelectorAll('[data-branch-for]').forEach(sel => {
       sel.onchange = async () => {
         const u = state.users.find(x => x.id === sel.dataset.branchFor);
@@ -20923,7 +21021,11 @@ async function init() {
   await loadCompany();
   const { data } = await sb.auth.getSession();
   state.session = data.session;
-  if (state.session) { await loadProfile(); await loadItems(); await loadParties(); await loadPurchases(); await loadSalesInvoices(); await loadWarehouses(); await loadPaymentMethods(); await loadAllAltNumbersMap(); }
+  if (state.session) { await loadProfile(); await loadItems(); await loadParties(); await loadPurchases(); await loadSalesInvoices(); await loadWarehouses(); await loadPaymentMethods(); await loadAllAltNumbersMap();
+    // بعد التحديث: الموظف اللي عنده أكتر من فرع وما اختار فرع قبل كده يختار، والمدير يكمل على آخر فرع اختاره
+    if (branchPickNeeded() && !canAllBranches() && !state.profile?.active_branch_id) { state.branchPickOpen = true; state.branchPickClosable = false; }
+  }
+  installBranchPickDelegation();
   render();
   if (state.session) checkAndRunAutoBackup();
   if (state.session && isAdmin()) checkApiRowLimit(); // فحص النسخة الاحتياطية بالخلفية، بدون ما يأخّر ظهور الشاشة
