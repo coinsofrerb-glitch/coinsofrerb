@@ -583,6 +583,7 @@ function render() {
     root.innerHTML = renderAuth();
     bindAuthEvents();
   } else {
+    document.querySelectorAll('body > #active-item-bar').forEach(el => el.remove()); // نسخة قديمة أُضيفت مباشرة للصفحة — render يرسم البار من جديد
     root.innerHTML = renderApp();
     bindAppEvents();
     attachWindowDragging();
@@ -1572,6 +1573,7 @@ async function loadSalesInvoices() {
 function filteredSalesInvoices() {
   const q = state.salesQuery.trim().toLowerCase();
   let list = state.salesInvoices;
+  if (isBranchUser()) list = list.filter(x => !x.branch_id || x.branch_id === userBranchId());
   if (q) list = list.filter(x => (x.invoice_number||'').toLowerCase().includes(q) || (x.parties?.name||'').toLowerCase().includes(q));
   if (state.salesFilterCustomerId) list = list.filter(x => x.customer_id === state.salesFilterCustomerId);
   if (state.salesFilterType && state.salesFilterType !== 'الكل') list = list.filter(x => x.invoice_type === state.salesFilterType);
@@ -2009,6 +2011,42 @@ async function openStockCountById(id) {
 async function loadWarehouses() {
   const { data, error } = await sb.from('warehouses').select('*').order('is_default', { ascending: false }).order('name');
   if (!error) state.warehouses = data || [];
+  await loadBranches();
+  await loadWarehouseStockMap();
+}
+// ---------- الفروع (المرحلة الأولى) ----------
+async function loadBranches() {
+  const { data, error } = await sb.from('branches').select('*').order('is_main', { ascending: false }).order('name');
+  state.branches = error ? [] : (data || []);
+  state.branchesReady = !error;
+}
+function userBranchId() { return (state.profile && state.profile.branch_id && state.branchesReady) ? state.profile.branch_id : null; }
+function isBranchUser() { return !!userBranchId(); }
+function branchName(id) { return (state.branches || []).find(b => b.id === id)?.name || ''; }
+function warehouseBranchId(whId) { return state.warehouses.find(w => w.id === whId)?.branch_id || null; }
+// مستودعات المستخدم: مستخدم الفرع يشوف مستودعات فرعه فقط، والباقي يشوف الكل
+function myWarehouses() { const b = userBranchId(); return b ? state.warehouses.filter(w => w.branch_id === b) : state.warehouses; }
+function whLabel(w) { const bn = state.branches && state.branches.length > 1 ? branchName(w.branch_id) : ''; return w.name + (bn ? ` — ${bn}` : ''); }
+async function loadWarehouseStockMap() {
+  if (!isBranchUser()) { state.whStock = null; return; }
+  const { data } = await fetchAllQ(() => sb.from('item_warehouse_stock').select('item_id, warehouse_id, qty').order('item_id').order('warehouse_id'));
+  const map = {};
+  (data || []).forEach(r => { (map[r.item_id] = map[r.item_id] || {})[r.warehouse_id] = Number(r.qty || 0); });
+  state.whStock = map;
+}
+// رصيد الصنف حسب المستخدم: مستخدم الفرع = رصيد مستودعات فرعه، غيره = الرصيد الكلي
+function itemQtyForUser(it) {
+  if (!it) return 0;
+  if (!isBranchUser() || !state.whStock) return Number(it.qty || 0);
+  const m = state.whStock[it.id] || {};
+  return myWarehouses().reduce((s2, w) => s2 + Number(m[w.id] || 0), 0);
+}
+// رصيد الصنف بالفروع الثانية (للعرض فقط)
+function itemQtyOtherBranches(it) {
+  if (!isBranchUser() || !state.whStock || !it) return [];
+  const m = state.whStock[it.id] || {}, my = userBranchId(), agg = {};
+  state.warehouses.forEach(w => { if (w.branch_id && w.branch_id !== my && Number(m[w.id] || 0) > 0) agg[w.branch_id] = (agg[w.branch_id] || 0) + Number(m[w.id]); });
+  return Object.entries(agg).map(([bid, q]) => ({ name: branchName(bid) || 'فرع', qty: q }));
 }
 function filteredWarehouses() {
   const q = state.warehouseQuery.trim().toLowerCase();
@@ -2016,8 +2054,9 @@ function filteredWarehouses() {
   return state.warehouses.filter(w => (w.name||'').toLowerCase().includes(q) || (w.code||'').toLowerCase().includes(q));
 }
 function defaultWarehouseId() {
-  const d = state.warehouses.find(w => w.is_default);
-  return d ? d.id : (state.warehouses[0] ? state.warehouses[0].id : '');
+  const list = myWarehouses();
+  const d = list.find(w => w.is_default);
+  return d ? d.id : (list[0] ? list[0].id : '');
 }
 async function getWarehouseStock(itemId, warehouseId) {
   const { data } = await sb.from('item_warehouse_stock').select('qty').eq('item_id', itemId).eq('warehouse_id', warehouseId).maybeSingle();
@@ -2082,16 +2121,29 @@ async function loadItemWarehouseBreakdown(itemId) {
 
 // ---------- WAREHOUSE TRANSFERS (سند تحويل مخزني) ----------
 async function loadTransfers() {
-  const { data, error } = await sb.from('warehouse_transfers').select('*, from:from_warehouse_id(name), to:to_warehouse_id(name)').order('created_at', { ascending: false });
+  const { data, error } = await sb.from('warehouse_transfers').select('*, from:from_warehouse_id(name, branch_id), to:to_warehouse_id(name, branch_id)').order('created_at', { ascending: false });
   if (!error) state.transfers = data || [];
 }
+function trStatusOf(x) { return x.status || (x.approved ? 'مستلم' : 'مسودة'); }
+const TR_STATUS_STYLE = { 'مسودة': ['#F1EFE8', '#6E6D5F', 'ti-pencil'], 'مرسل': ['#FFF3D6', '#A8660A', 'ti-truck'], 'مستلم': ['#E1F5EE', '#0F6E56', 'ti-circle-check'], 'مستلم بنقص': ['#FCEBEB', '#C0392B', 'ti-alert-triangle'] };
+function trStatusBadge(st) { const [bg, fg, ic] = TR_STATUS_STYLE[st] || TR_STATUS_STYLE['مسودة']; return `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:600;background:${bg};color:${fg};"><i class="ti ${ic}"></i>${st === 'مرسل' ? 'في الطريق' : st}</span>`; }
 function filteredTransfers() {
   const q = state.transferQuery.trim().toLowerCase();
-  if (!q) return state.transfers;
-  return state.transfers.filter(x => (x.transfer_number||'').toLowerCase().includes(q));
+  let list = state.transfers;
+  const ub = userBranchId();
+  if (ub) list = list.filter(x => x.from?.branch_id === ub || x.to?.branch_id === ub);
+  if (q) list = list.filter(x => (x.transfer_number||'').toLowerCase().includes(q) || (x.from?.name||'').toLowerCase().includes(q) || (x.to?.name||'').toLowerCase().includes(q));
+  if (state.transferFilterStatus) list = list.filter(x => trStatusOf(x) === state.transferFilterStatus);
+  if (state.transferFilterFrom) list = list.filter(x => (x.transfer_date || '') >= state.transferFilterFrom);
+  if (state.transferFilterTo) list = list.filter(x => (x.transfer_date || '') <= state.transferFilterTo);
+  return list;
 }
 function newTransferForm() {
-  return { transfer_number:'', from_warehouse_id: defaultWarehouseId(), to_warehouse_id:'', transfer_date:new Date().toISOString().slice(0,10), notes:'', lines:[], approved:false };
+  return { transfer_number:'', from_warehouse_id: defaultWarehouseId(), to_warehouse_id:'', transfer_date:new Date().toISOString().slice(0,10), notes:'', lines:[], approved:false, status:'مسودة' };
+}
+async function trStockIn(itemId, whId) {
+  if (state.whStock && state.whStock[itemId] && whId in state.whStock[itemId]) return Number(state.whStock[itemId][whId] || 0);
+  return await getWarehouseStock(itemId, whId);
 }
 async function openTransferById(id) {
   const t = state.transfers.find(x => x.id === id);
@@ -2099,8 +2151,9 @@ async function openTransferById(id) {
   const { data: lineRows } = await sb.from('warehouse_transfer_items').select('*, items(name, sku, unit)').eq('transfer_id', id);
   state.transferForm = {
     transfer_number: t.transfer_number, from_warehouse_id: t.from_warehouse_id, to_warehouse_id: t.to_warehouse_id,
-    transfer_date: t.transfer_date, notes: t.notes||'', approved: !!t.approved,
-    lines: (lineRows||[]).map(l => ({ item_id:l.item_id, item_name:l.items?.name||'', sku:l.items?.sku||'', unit:l.items?.unit||'', quantity:Number(l.quantity) })),
+    transfer_date: t.transfer_date, notes: t.notes||'', approved: !!t.approved, status: trStatusOf(t), received_notes: t.received_notes || '',
+    sent_at: t.sent_at || null, received_at: t.received_at || null,
+    lines: (lineRows||[]).map(l => ({ item_id:l.item_id, item_name:l.items?.name||'', sku:l.items?.sku||'', unit:l.items?.unit||'', quantity:Number(l.quantity), received_qty: l.received_qty == null ? null : Number(l.received_qty) })),
   };
   state.editingTransferId = id;
   state.showTransferForm = true;
@@ -3361,7 +3414,7 @@ function renderPurchaseFormModal() {
           <label class="sx-lbl">رقم الطلبية</label>
           <input id="pi-order-number" class="sx-in mono" style="text-align:center;" value="${escapeHtml(f.order_number||'')}" ${dis} />
           <label class="sx-lbl">${t('inv_warehouse_receive')}</label>
-          <select id="pi-warehouse" class="sx-in" ${dis}>${state.warehouses.map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>
+          <select id="pi-warehouse" class="sx-in" ${dis}>${myWarehouses().map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>
           <label class="sx-lbl">${tot.isForeign ? 'سعر الصرف' : 'رقم الجوال'}</label>
           ${tot.isForeign
             ? `<input id="pi-exchange-rate" class="sx-in mono" value="${escapeHtml(f.exchange_rate)}" ${dis} title="1 ${escapeHtml(f.currency)} = ? ريال" />`
@@ -5428,7 +5481,7 @@ function renderSalesFormModal() {
 
           <div style="display:${tab==='extra'?'grid':'none'};grid-template-columns:130px 1fr 130px 1fr;gap:8px 10px;align-items:center;padding:14px;">
             <label class="sx-lbl">${t('inv_warehouse')}</label>
-            <select id="si-warehouse" class="sx-in" ${dis}>${state.warehouses.map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>
+            <select id="si-warehouse" class="sx-in" ${dis}>${myWarehouses().map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>
             <label class="sx-lbl">${t('inv_payment_method')}</label>
             ${f.invoice_type === 'نقدي' ? `<select id="si-payment-method" class="sx-in" ${dis}><option value="">—</option>${activePaymentMethods().map(m => `<option value="${escapeHtml(m.name)}" ${f.payment_method===m.name?'selected':''}>${escapeHtml(m.name)}</option>`).join('')}</select>` : '<input class="sx-in sx-ro" value="آجل" disabled />'}
             <label class="sx-lbl">${t('inv_customer_ref')}</label>
@@ -5817,7 +5870,7 @@ function renderSalesReturnFormModal() {
           <label class="sx-lbl">طريقة الرد</label>
           <select id="sr-payment-method" class="sx-in" ${dis}><option value="">— خصم من الرصيد</option>${activePaymentMethods().map(m => `<option value="${escapeHtml(m.name)}" ${f.payment_method===m.name?'selected':''}>${escapeHtml(m.name)}</option>`).join('')}</select>
           <label class="sx-lbl">المستودع</label>
-          <select id="sr-warehouse" class="sx-in" ${dis}>${state.warehouses.map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>
+          <select id="sr-warehouse" class="sx-in" ${dis}>${myWarehouses().map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>
           <label class="sx-lbl">الجوال</label>
           <input class="sx-in sx-ro mono" dir="ltr" value="${escapeHtml(cust?.mobile || cust?.phone || '')}" disabled />
         </div>
@@ -6013,7 +6066,7 @@ function renderPurchaseReturnFormModal() {
           <label class="sx-lbl">طريقة الرد</label>
           <select id="pr-payment-method" class="sx-in" ${dis}><option value="">— خصم من الرصيد</option>${activePaymentMethods().map(m => `<option value="${escapeHtml(m.name)}" ${f.payment_method===m.name?'selected':''}>${escapeHtml(m.name)}</option>`).join('')}</select>
           <label class="sx-lbl">المستودع</label>
-          <select id="pr-warehouse" class="sx-in" ${dis}>${state.warehouses.map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>
+          <select id="pr-warehouse" class="sx-in" ${dis}>${myWarehouses().map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>
           <label class="sx-lbl">الجوال</label>
           <input class="sx-in sx-ro mono" dir="ltr" value="${escapeHtml(cust?.mobile || cust?.phone || '')}" disabled />
         </div>
@@ -6161,7 +6214,7 @@ function renderStockCountFormModal() {
         ${renderNumberNavHtml('sc', f.count_number, state.editingStockCountId, state.stockCounts, 'count_number', v => v.warehouses?.name||'')}
       </div>
       <div class="no-print" style="padding:8px 16px 0;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
-        ${partyField(t('sc_warehouse')+' *', `<select id="sc-warehouse" class="input" ${f.approved||f.lines.length?'disabled':''}>${state.warehouses.map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>`)}
+        ${partyField(t('sc_warehouse')+' *', `<select id="sc-warehouse" class="input" ${f.approved||f.lines.length?'disabled':''}>${myWarehouses().map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>`)}
         ${partyField(t('sc_date'), `<input id="sc-date" type="date" class="input" value="${escapeHtml(f.count_date)}" ${f.approved?'disabled':''} />`)}
         ${partyField(t('sc_notes'), `<input id="sc-notes" class="input" value="${escapeHtml(f.notes)}" ${f.approved?'disabled':''} />`)}
       </div>
@@ -6228,14 +6281,28 @@ function renderWarehousesSection() {
           <div style="flex:1;min-width:220px;"><input id="wh-search" class="input" placeholder="${t('wh_search_ph')}" value="${escapeHtml(state.warehouseQuery)}" /></div>
           <button id="new-wh-btn" class="btn primary" style="padding:8px 14px;">${t('wh_new')}</button>
         </div>
+        ${state.branchesReady && isAdmin() ? `
+        <div style="border:1px solid #DCE3EE;background:#F6F8FB;border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <div style="font-size:13px;font-weight:700;color:#1B3352;"><i class="ti ti-building-store"></i> الفروع <span style="font-weight:400;font-size:11.5px;color:#6E6D5F;">— كل مستودع يتبع فرع. اربط الموظف بفرعه من «المستخدمين».</span></div>
+            <button id="new-branch-btn" class="btn" style="padding:5px 12px;font-size:12px;">+ فرع جديد</button>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            ${state.branches.map(b => `<button type="button" data-open-branch="${b.id}" style="border:1px solid ${b.active ? '#B9C7DC' : '#E4C9A0'};background:#fff;border-radius:10px;padding:7px 12px;cursor:pointer;font-family:inherit;text-align:right;">
+              <div style="font-size:12.5px;font-weight:600;color:#1B3352;">${escapeHtml(b.name)} ${b.is_main ? '⭐' : ''} ${b.code ? `<span class="mono" style="font-weight:400;color:#6E6D5F;">(${escapeHtml(b.code)})</span>` : ''}</div>
+              <div style="font-size:11px;color:#6E6D5F;">${state.warehouses.filter(w => w.branch_id === b.id).length} مستودع · ${(state.users || []).filter(u => u.branch_id === b.id).length} موظف${b.active ? '' : ' · موقوف'}</div>
+            </button>`).join('')}
+          </div>
+        </div>` : ''}
         <div style="font-size:12px;color:#5F5E5A;margin-bottom:8px;">${list.length} ${t('menu_warehouses')}</div>
         <div style="border:1px solid #E4E2DA;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(27,51,82,0.06);">
-          <div style="display:grid;grid-template-columns:1.3fr 0.8fr 1.5fr 0.6fr 0.6fr;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;font-size:11.5px;font-weight:500;">
-            ${[t('col_wh_name'),t('col_wh_code'),t('col_address'),t('col_default'),t('col_status')].map(h => `<div style="padding:7px 8px;border-left:1px solid #1B3352;">${h}</div>`).join('')}
+          <div style="display:grid;grid-template-columns:1.3fr 1fr 0.8fr 1.5fr 0.6fr 0.6fr;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;font-size:11.5px;font-weight:500;">
+            ${[t('col_wh_name'),'الفرع',t('col_wh_code'),t('col_address'),t('col_default'),t('col_status')].map(h => `<div style="padding:7px 8px;border-left:1px solid #1B3352;">${h}</div>`).join('')}
           </div>
           ${list.map((w,i) => `
-            <div data-open-wh="${w.id}" style="display:grid;grid-template-columns:1.3fr 0.8fr 1.5fr 0.6fr 0.6fr;background:${i%2?'#F4F1EA':'#FFFDF6'};font-size:12.5px;align-items:center;cursor:pointer;">
+            <div data-open-wh="${w.id}" style="display:grid;grid-template-columns:1.3fr 1fr 0.8fr 1.5fr 0.6fr 0.6fr;background:${i%2?'#F4F1EA':'#FFFDF6'};font-size:12.5px;align-items:center;cursor:pointer;">
               <div style="padding:7px 8px;">${escapeHtml(w.name)}</div>
+              <div style="padding:7px 8px;">${escapeHtml(branchName(w.branch_id) || '—')}</div>
               <div style="padding:7px 8px;" class="mono">${escapeHtml(w.code||'—')}</div>
               <div style="padding:7px 8px;">${escapeHtml(w.address||'—')}</div>
               <div style="padding:7px 8px;">${w.is_default ? '⭐' : ''}</div>
@@ -6244,7 +6311,31 @@ function renderWarehousesSection() {
           ${list.length===0 ? `<div style="padding:20px;text-align:center;font-size:12.5px;color:#6E6D5F;">${t('wh_no_results')}</div>` : ''}
         </div>
       </div>
-      ${state.showWarehouseForm ? renderWarehouseFormModal() : ''}`;
+      ${state.showWarehouseForm ? renderWarehouseFormModal() : ''}
+      ${state.showBranchForm ? renderBranchFormModal() : ''}`;
+}
+function renderBranchFormModal() {
+  const f = state.branchForm || {};
+  return `
+  <div id="br-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;padding:16px;z-index:12;">
+    <div style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.3);" onclick="event.stopPropagation()">
+      <div class="win-title"><span>${state.editingBranchId ? 'تعديل فرع' : 'فرع جديد'}</span><button id="br-close" style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
+      <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
+        ${partyField('اسم الفرع *', `<input id="br-name" class="input" value="${escapeHtml(f.name||'')}" placeholder="مثال: فرع جدة" />`)}
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+          ${partyField('الرمز', `<input id="br-code" class="input" dir="ltr" value="${escapeHtml(f.code||'')}" placeholder="J" />`)}
+          ${partyField('الجوال', `<input id="br-phone" class="input" dir="ltr" value="${escapeHtml(f.phone||'')}" />`)}
+        </div>
+        ${partyField('العنوان', `<input id="br-address" class="input" value="${escapeHtml(f.address||'')}" />`)}
+        <label style="font-size:12.5px;"><input id="br-active" type="checkbox" ${f.active!==false?'checked':''} ${f.is_main?'disabled':''} /> نشط</label>
+        ${!state.editingBranchId ? `<label style="font-size:12.5px;background:#F6F8FB;border-radius:8px;padding:8px 10px;"><input id="br-create-wh" type="checkbox" checked /> إنشاء مستودع للفرع تلقائياً بنفس الاسم</label>` : ''}
+      </div>
+      <div style="display:flex;gap:8px;padding:10px 16px 16px;border-top:1px solid #A9A48C;">
+        ${iconBtn('br-cancel', 'ti-x', '#C0392B', 'الغاء')}
+        ${iconBtn('br-save', 'ti-device-floppy', '#2C4A6E', 'حفظ')}
+      </div>
+    </div>
+  </div>`;
 }
 
 function renderWarehouseFormModal() {
@@ -6255,6 +6346,7 @@ function renderWarehouseFormModal() {
       <div class="win-title"><span>${state.editingWarehouseId ? 'تعديل مستودع' : 'مستودع جديد'}</span><button id="wh-close" style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
       <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
         ${partyField('اسم المستودع *', `<input id="wh-name" class="input" value="${escapeHtml(f.name||'')}" />`)}
+        ${state.branchesReady ? partyField('الفرع *', `<select id="wh-branch" class="input">${state.branches.map(b => `<option value="${b.id}" ${(f.branch_id || state.branches.find(x => x.is_main)?.id) === b.id ? 'selected' : ''}>${escapeHtml(b.name)}</option>`).join('')}</select>`) : ''}
         ${partyField('الرمز', `<input id="wh-code" class="input" value="${escapeHtml(f.code||'')}" dir="ltr" />`)}
         ${partyField('العنوان', `<input id="wh-address" class="input" value="${escapeHtml(f.address||'')}" />`)}
         <label style="font-size:12.5px;"><input id="wh-active" type="checkbox" ${f.active!==false?'checked':''} /> نشط</label>
@@ -6275,61 +6367,88 @@ function renderTransfersSection() {
           <div style="flex:1;min-width:220px;"><input id="tr-search" class="input" placeholder="بحث برقم السند..." value="${escapeHtml(state.transferQuery)}" /></div>
           <button id="new-tr-btn" class="btn primary" style="padding:8px 14px;">+ سند تحويل جديد</button>
         </div>
+        ${(() => { const pending = state.transfers.filter(x => trStatusOf(x) === 'مرسل' && (!userBranchId() || x.to?.branch_id === userBranchId())); return pending.length ? `
+        <div style="background:#FFF3D6;border:1px solid #F0C36D;border-radius:10px;padding:9px 12px;margin-bottom:10px;font-size:12.5px;color:#8A5A12;display:flex;align-items:center;gap:8px;">
+          <i class="ti ti-truck" style="font-size:18px;"></i><b>${pending.length} تحويل بالطريق بانتظار الاستلام</b> — افتح السند واضغط «تأكيد الاستلام» لما توصل البضاعة.
+          <button type="button" id="tr-show-pending" class="btn" style="padding:3px 10px;font-size:11.5px;margin-right:auto;">عرضها</button></div>` : ''; })()}
+        <div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap;margin-bottom:10px;">
+          <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">الحالة</div><select id="tr-f-status" class="input" style="padding:5px 8px;">${['', 'مسودة', 'مرسل', 'مستلم', 'مستلم بنقص'].map(v => `<option value="${v}" ${state.transferFilterStatus === v ? 'selected' : ''}>${v === '' ? 'الكل' : v === 'مرسل' ? 'في الطريق' : v}</option>`).join('')}</select></div>
+          <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">من تاريخ</div><input id="tr-f-from" type="date" class="input" style="padding:5px 8px;" value="${escapeHtml(state.transferFilterFrom || '')}" /></div>
+          <div><div style="font-size:10.5px;color:#5F5E5A;margin-bottom:3px;">إلى تاريخ</div><input id="tr-f-to" type="date" class="input" style="padding:5px 8px;" value="${escapeHtml(state.transferFilterTo || '')}" /></div>
+          <button id="tr-f-clear" class="btn" style="padding:6px 12px;">مسح</button>
+          <button id="tr-f-excel" class="btn" style="padding:6px 12px;"><i class="ti ti-file-spreadsheet"></i> Excel</button>
+        </div>
         <div style="font-size:12px;color:#5F5E5A;margin-bottom:8px;">${list.length} سند</div>
         ${renderTableList({ attr:'data-open-tr', rows:list, empty:'لا توجد تحويلات بعد', cols:[
           { h:'رقم التحويل', cls:'code', v:p => escapeHtml(p.transfer_number||'') },
           { h:'التاريخ', cls:'num', v:p => escapeHtml(p.transfer_date||'') },
-          { h:'من مستودع', cls:'name', v:p => escapeHtml(p.from?.name||'—') },
-          { h:'إلى مستودع', cls:'name', v:p => escapeHtml(p.to?.name||'—') },
+          { h:'من مستودع', cls:'name', v:p => escapeHtml(p.from?.name||'—') + (state.branches?.length > 1 && p.from?.branch_id ? `<div style="font-size:10.5px;color:#8B8A7A;">${escapeHtml(branchName(p.from.branch_id))}</div>` : '') },
+          { h:'إلى مستودع', cls:'name', v:p => escapeHtml(p.to?.name||'—') + (state.branches?.length > 1 && p.to?.branch_id ? `<div style="font-size:10.5px;color:#8B8A7A;">${escapeHtml(branchName(p.to.branch_id))}</div>` : '') },
           { h:'ملاحظات', v:p => _note(p.notes) },
-          { h:'الحالة', cls:'c', v:'status' }] })}
+          { h:'الحالة', cls:'c', v:p => trStatusBadge(trStatusOf(p)) }] })}
       </div>
       ${state.showTransferForm ? renderTransferFormModal() : ''}`;
 }
 
 function renderTransferFormModal() {
   const f = state.transferForm;
+  const st = f.status || (f.approved ? 'مستلم' : 'مسودة');
+  const locked = f.approved || st !== 'مسودة';
+  const fromB = warehouseBranchId(f.from_warehouse_id), toB = warehouseBranchId(f.to_warehouse_id);
+  const crossBranch = !!(state.branchesReady && f.to_warehouse_id && fromB && toB && fromB !== toB);
+  const ub = userBranchId();
+  const canReceive = st === 'مرسل' && (!ub || ub === toB) && (canApprove() || ub === toB);
+  const showRecv = st === 'مرسل' && canReceive;
+  const showRecvCol = st === 'مستلم بنقص' || st === 'مستلم' && f.lines.some(l => l.received_qty != null && l.received_qty !== l.quantity);
+  const fromOpts = locked ? state.warehouses : myWarehouses();
+  const toOpts = state.warehouses.filter(w => w.id !== f.from_warehouse_id && w.active !== false);
+  const th = h => `<th style="padding:7px 6px;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;font-size:10.5px;font-weight:500;text-align:right;">${h}</th>`;
   return `
   <div id="tr-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;padding:16px;z-index:10;">
-    <div class="print-area" style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:820px;max-height:92vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.3), 0 4px 12px rgba(0,0,0,0.15);" onclick="event.stopPropagation()">
+    <div class="print-area" style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:860px;max-height:92vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.3), 0 4px 12px rgba(0,0,0,0.15);" onclick="event.stopPropagation()">
       <div class="win-title"><span>${t('tr_title')}</span><button id="tr-close" class="no-print" style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
-      ${f.approved ? `<div class="no-print" style="margin:8px 16px 0;text-align:center;background:#D9534F;color:#fff;padding:6px;border-radius:3px;font-weight:600;font-size:13px;">${t('approved_short')}</div>` : ''}
-      <div class="no-print" style="padding:14px 16px 0;display:flex;align-items:center;gap:8px;position:relative;">
+      <div class="no-print" style="padding:14px 16px 0;display:flex;align-items:center;gap:10px;position:relative;flex-wrap:wrap;">
         <label style="font-size:12.5px;color:#3A3826;">${t('voucher_number_label')}</label>
         ${renderNumberNavHtml('tr', f.transfer_number, state.editingTransferId, state.transfers, 'transfer_number', v => v.notes||'')}
+        ${state.editingTransferId ? trStatusBadge(st) : ''}
+        ${crossBranch && st === 'مسودة' ? `<span style="font-size:11.5px;color:#A8660A;background:#FFF8E8;border:1px solid #F0C36D;border-radius:8px;padding:3px 9px;"><i class="ti ti-truck"></i> تحويل بين فرعين: يُرسل أولاً، ثم يؤكد الفرع المستلِم الاستلام</span>` : ''}
       </div>
       <div class="no-print" style="padding:8px 16px 0;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
-        ${partyField(t('tr_from')+' *', `<select id="tr-from" class="input" ${f.approved?'disabled':''}>${state.warehouses.map(w => `<option value="${w.id}" ${f.from_warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>`)}
-        ${partyField(t('tr_to')+' *', `<select id="tr-to" class="input" ${f.approved?'disabled':''}><option value="">اختر...</option>${state.warehouses.map(w => `<option value="${w.id}" ${f.to_warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>`)}
-        ${partyField(t('tr_date'), `<input id="tr-date" type="date" class="input" value="${escapeHtml(f.transfer_date)}" ${f.approved?'disabled':''} />`)}
+        ${partyField(t('tr_from')+' *', `<select id="tr-from" class="input" ${locked?'disabled':''}>${fromOpts.map(w => `<option value="${w.id}" ${f.from_warehouse_id===w.id?'selected':''}>${escapeHtml(whLabel(w))}</option>`).join('')}</select>`)}
+        ${partyField(t('tr_to')+' *', `<select id="tr-to" class="input" ${locked?'disabled':''}><option value="">اختر...</option>${(locked ? state.warehouses : toOpts).map(w => `<option value="${w.id}" ${f.to_warehouse_id===w.id?'selected':''}>${escapeHtml(whLabel(w))}</option>`).join('')}</select>`)}
+        ${partyField(t('tr_date'), `<input id="tr-date" type="date" class="input" value="${escapeHtml(f.transfer_date)}" ${locked?'disabled':''} />`)}
       </div>
+      ${f.sent_at || f.received_at ? `<div class="no-print" style="padding:8px 16px 0;font-size:11.5px;color:#5F5E5A;display:flex;gap:16px;flex-wrap:wrap;">
+        ${f.sent_at ? `<span><i class="ti ti-truck"></i> أُرسل: <span class="mono">${escapeHtml(new Date(f.sent_at).toLocaleString('ar-SA-u-nu-latn'))}</span></span>` : ''}
+        ${f.received_at ? `<span><i class="ti ti-circle-check"></i> استُلم: <span class="mono">${escapeHtml(new Date(f.received_at).toLocaleString('ar-SA-u-nu-latn'))}</span></span>` : ''}
+        ${f.received_notes ? `<span><i class="ti ti-note"></i> ${escapeHtml(f.received_notes)}</span>` : ''}</div>` : ''}
       <div style="padding:14px 16px;">
-        ${!f.approved ? `
+        ${!locked ? `
         <div class="no-print" id="tr-item-info" style="display:none;margin-bottom:8px;padding:6px 12px;background:#E1F5EE;border:1px solid #0F6E56;border-radius:4px;font-size:12px;color:#0F6E56;font-weight:500;"></div>
-        <div class="no-print" style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+        <div class="no-print" style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
           <select id="tr-item-select" class="input" style="display:none;"><option value="">اختر صنف...</option>${state.items.map(it => `<option value="${it.id}">${escapeHtml(it.name)} (${escapeHtml(it.sku)})</option>`).join('')}</select>
           ${itemPickerButton('tr-item-select','tr-item-qty',null,null,'tr-add-line')}
           <input id="tr-item-qty" class="input" style="max-width:80px;" placeholder="الكمية" />
           <button id="tr-add-line" class="btn primary" style="padding:6px 14px;">إضافة</button>
+          <span id="tr-avail" style="font-size:12px;color:#2C4A6E;font-weight:600;"></span>
         </div>` : ''}
+        ${showRecv ? `<div class="no-print" style="background:#FFF8E8;border:1px solid #F0C36D;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12px;color:#8A5A12;"><i class="ti ti-truck"></i> عدّ البضاعة اللي وصلت. لو وصل أقل، اكتب الكمية اللي وصلت فعلاً في خانة «المستلم» — الفرق يُسجّل كنقص.</div>` : ''}
         <div class="print-scroll" style="border:1px solid #E4E2DA;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(27,51,82,0.06);overflow-x:auto;">
           <table style="width:100%;border-collapse:collapse;">
             <thead><tr>
-              ${[t('col_no'),t('col_item_sku'),t('col_item_name'),t('col_unit'),t('col_qty_transfer'),''].map(h => `<th style="padding:7px 6px;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;font-size:10.5px;font-weight:500;text-align:right;">${h}</th>`).join('')}
+              ${[t('col_no'),t('col_item_sku'),t('col_item_name'),t('col_unit'),t('col_qty_transfer'), ...(showRecv || showRecvCol ? ['المستلم'] : []), ''].map(th).join('')}
             </tr></thead>
             <tbody>
-              ${f.lines.map((l,idx) => { const bg = idx%2?'#F4F1EA':'#FFFDF6'; return `
+              ${f.lines.map((l,idx) => { const bg = idx%2?'#F4F1EA':'#FFFDF6'; const td = (v, ex = '') => `<td style="padding:7px 6px;background:${bg};font-size:11.5px;border-bottom:1px solid #E4E2DA;white-space:nowrap;${ex}">${v}</td>`; return `
               <tr>
-              <td style="padding:7px 6px;background:${bg};color:#8B8A7A;font-size:11.5px;border-bottom:1px solid #E4E2DA;white-space:nowrap;">${idx+1}</td>
-              <td class="mono" style="padding:7px 6px;background:${bg};font-size:11.5px;border-bottom:1px solid #E4E2DA;white-space:nowrap;">${escapeHtml(l.sku||'')}</td>
-              <td style="padding:7px 6px;background:${bg};font-size:11.5px;border-bottom:1px solid #E4E2DA;">${escapeHtml(l.item_name)}</td>
-              <td style="padding:7px 6px;background:${bg};font-size:11.5px;border-bottom:1px solid #E4E2DA;white-space:nowrap;">${escapeHtml(l.unit||'')}</td>
-              <td class="mono" style="padding:7px 6px;background:${bg};font-size:11.5px;border-bottom:1px solid #E4E2DA;white-space:nowrap;">${l.quantity}</td>
-              <td style="padding:4px;background:${bg};border-bottom:1px solid #E4E2DA;">${f.approved ? '' : `<button data-remove-tr-line="${idx}" class="no-print" style="border:none;background:none;color:#C0392B;cursor:pointer;font-size:14px;">✕</button>`}</td>
-              </tr>`; }).join('') || `<tr><td colspan="6" style="padding:16px;text-align:center;font-size:12px;color:#6E6D5F;">${t('no_items_returns')}</td></tr>`}
+              ${td(idx+1, 'color:#8B8A7A;')}${td(escapeHtml(l.sku||''), 'font-family:monospace;')}${td(escapeHtml(l.item_name), 'white-space:normal;')}${td(escapeHtml(l.unit||''))}${td(l.quantity, 'font-family:monospace;')}
+              ${showRecv ? td(`<input data-tr-recv="${l.item_id}" class="input mono" type="number" min="0" max="${l.quantity}" step="any" value="${l.quantity}" style="width:80px;padding:3px 6px;" />`) : showRecvCol ? td(`<b style="color:${(l.received_qty ?? l.quantity) < l.quantity ? '#C0392B' : '#0F6E56'};">${l.received_qty ?? l.quantity}</b>${(l.received_qty ?? l.quantity) < l.quantity ? ` <span style="color:#C0392B;font-size:10.5px;">(نقص ${l.quantity - l.received_qty})</span>` : ''}`, 'font-family:monospace;') : ''}
+              ${td(locked ? '' : `<button data-remove-tr-line="${idx}" class="no-print" style="border:none;background:none;color:#C0392B;cursor:pointer;font-size:14px;">✕</button>`, 'padding:4px;')}
+              </tr>`; }).join('') || `<tr><td colspan="7" style="padding:16px;text-align:center;font-size:12px;color:#6E6D5F;">${t('no_items_returns')}</td></tr>`}
             </tbody>
           </table>
         </div>
+        ${showRecv ? `<div class="no-print" style="margin-top:10px;">${partyField('ملاحظات الاستلام (اختياري)', `<input id="tr-recv-notes" class="input" placeholder="مثال: كرتون واحد ناقص" />`)}</div>` : ''}
       </div>
       <div class="no-print" style="display:flex;gap:8px;padding:10px 16px 16px;border-top:1px solid #A9A48C;flex-wrap:wrap;">
         ${iconBtn('tr-exit', 'ti-door-exit', '#C0392B', t('btn_exit'))}
@@ -6337,9 +6456,11 @@ function renderTransferFormModal() {
         ${iconBtn('tr-prev', 'ti-player-track-prev', '#2E86C1', t('btn_prev'), state.transfers.length===0)}
         ${iconBtn('tr-print', 'ti-printer', '#5F5E5A', 'طباعة', !state.editingTransferId)}
         ${iconBtn('tr-pdf', 'ti-file-type-pdf', '#D9534F', 'حفظ PDF (طباعة)', !state.editingTransferId)}
-        ${f.approved ? '' : iconBtn('tr-cancel', 'ti-x', '#C0392B', 'الغاء')}
-        ${f.approved ? '' : iconBtn('tr-save', 'ti-device-floppy', '#2C4A6E', 'حفظ')}
-        ${(!f.approved && state.editingTransferId && canApprove()) ? iconBtn('tr-approve', 'ti-lock', '#0F6E56', 'ترحيل (نقل المخزون)') : ''}
+        ${locked ? '' : iconBtn('tr-cancel', 'ti-x', '#C0392B', 'الغاء')}
+        ${locked ? '' : iconBtn('tr-save', 'ti-device-floppy', '#2C4A6E', 'حفظ')}
+        ${(!locked && state.editingTransferId && canApprove()) ? iconBtn('tr-approve', crossBranch ? 'ti-truck' : 'ti-lock', '#0F6E56', crossBranch ? 'إرسال للفرع' : 'ترحيل (نقل المخزون)') : ''}
+        ${showRecv ? iconBtn('tr-receive', 'ti-circle-check', '#0F6E56', 'تأكيد الاستلام') : ''}
+        ${st === 'مرسل' && isAdmin() ? iconBtn('tr-cancel-send', 'ti-arrow-back-up', '#BA7517', 'إلغاء الإرسال') : ''}
       </div>
     </div>
   </div>`;
@@ -6444,7 +6565,7 @@ function renderOpeningInvFormModal() {
         <input class="input mono" value="${escapeHtml(f.doc_number || t('auto_generated'))}" disabled style="background:#EDEAE0;color:#5F5E5A;max-width:140px;" />
       </div>
       <div style="padding:8px 16px 0;display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
-        ${partyField('المستودع *', `<select id="oif-warehouse" class="input" ${f.approved||f.lines.length?'disabled':''}>${state.warehouses.map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>`)}
+        ${partyField('المستودع *', `<select id="oif-warehouse" class="input" ${f.approved||f.lines.length?'disabled':''}>${myWarehouses().map(w => `<option value="${w.id}" ${f.warehouse_id===w.id?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}</select>`)}
         ${partyField('التاريخ', `<input id="oif-date" type="date" class="input" value="${escapeHtml(f.doc_date)}" ${f.approved?'disabled':''} />`)}
         ${partyField('ملاحظات', `<input id="oif-notes" class="input" value="${escapeHtml(f.notes)}" ${f.approved?'disabled':''} />`)}
       </div>
@@ -6582,7 +6703,7 @@ function renderActiveItemBar() {
   const altShown = alts.slice(0, 6);
   const altItems = findAlternativeItems(it);
   const altAvail = altItems.filter(x => Number(x.qty || 0) > 0);
-  const outOfStock = Number(it.qty) <= 0;
+  const outOfStock = itemQtyForUser(it) <= 0;
   const chip = 'display:inline-flex;align-items:center;gap:4px;background:rgba(255,255,255,0.18);border:1px solid rgba(255,255,255,0.35);color:#fff;border-radius:12px;padding:2px 9px;font-size:11.5px;cursor:pointer;';
   const secondRow = (alts.length || altItems.length) ? `
     <div style="flex-basis:100%;display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,0.25);padding-top:8px;">
@@ -6601,7 +6722,8 @@ function renderActiveItemBar() {
     ${Number(it.price3) > 0 ? `<div style="display:flex;align-items:center;gap:6px;"><span style="font-size:11px;opacity:0.85;">سعر 3:</span><span class="mono" style="font-weight:700;">${fmt(it.price3)}</span></div>` : ''}
     ${admin ? `<div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-receipt"></i><span style="font-size:11px;opacity:0.85;">التكلفة:</span><span class="mono" style="font-weight:700;">${fmt(it.cost)}</span></div>` : ''}
     <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-map-pin"></i><span style="font-size:11px;opacity:0.85;">الموقع:</span><span class="mono" style="font-weight:700;">${escapeHtml([it.location1,it.location2,it.location3,it.location4].filter(Boolean).join(' / ') || '—')}</span></div>
-    <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-boxes"></i><span style="font-size:11px;opacity:0.85;">الكمية بالمخزون:</span><span class="mono" style="font-weight:700;color:${outOfStock?'#FFD8D8':'#fff'};">${it.qty}</span></div>
+    <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-boxes"></i><span style="font-size:11px;opacity:0.85;">${isBranchUser() ? 'رصيد فرعك:' : 'الكمية بالمخزون:'}</span><span class="mono" style="font-weight:700;color:${outOfStock?'#FFD8D8':'#fff'};">${itemQtyForUser(it)}</span></div>
+    ${itemQtyOtherBranches(it).length ? `<div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-building-store"></i><span style="font-size:11px;opacity:0.85;">فروع أخرى:</span>${itemQtyOtherBranches(it).map(o => `<span style="background:rgba(255,255,255,0.18);border-radius:10px;padding:1px 8px;font-size:11.5px;">${escapeHtml(o.name)} <b class="mono">${o.qty}</b></span>`).join('')}</div>` : ''}
     <button type="button" data-bar-history="${it.id}" style="${chip}font-size:12px;padding:4px 12px;" title="سجل أسعار البيع بالتواريخ (F6)"><i class="ti ti-history"></i> سجل الأسعار</button>
     <button id="active-item-bar-close" class="no-print" style="margin-right:auto;background:rgba(255,255,255,0.2);border:none;color:#fff;width:22px;height:22px;border-radius:50%;cursor:pointer;">✕</button>
     ${secondRow}
@@ -10326,6 +10448,14 @@ function renderUsersModal() {
               <label><input type="checkbox" data-perm="can_manage_backup" data-perm-user="${u.id}" ${(u.role==='admin'||u.can_manage_backup)?'checked':''} ${u.role==='admin'?'disabled':''} /> النسخ الاحتياطية والصيانة</label>
               ${u.role==='admin' ? `<span style="color:#A9A48C;">(المدير عنده كل الصلاحيات تلقائياً)</span>` : ''}
             </div>
+            ${state.branchesReady && state.branches.length ? `<div style="padding:0 8px 8px;display:flex;align-items:center;gap:8px;font-size:11.5px;color:#1B3352;">
+              <i class="ti ti-building-store"></i><span style="font-weight:500;">الفرع:</span>
+              <select data-branch-for="${u.id}" class="input" style="padding:3px 6px;font-size:11.5px;max-width:200px;" ${u.is_support ? 'disabled title="المصمم يشوف كل الفروع"' : ''}>
+                <option value="">كل الفروع</option>
+                ${state.branches.map(b => `<option value="${b.id}" ${u.branch_id === b.id ? 'selected' : ''}>${escapeHtml(b.name)}</option>`).join('')}
+              </select>
+              <span style="color:#8B8A7A;">${u.branch_id ? 'يبيع ويشوف رصيد فرعه فقط' : 'يشوف كل الفروع'}</span>
+            </div>` : ''}
             </fieldset>
             </div>`).join('')}
         </div>
@@ -14177,6 +14307,7 @@ function bindAppEvents() {
       }
       if (target === '__warehouses__') {
         await loadWarehouses();
+        if (isAdmin()) await loadUsers();
         state.activeSection = '__warehouses__';
         render();
         return;
@@ -15248,13 +15379,16 @@ function bindAppEvents() {
         errEl.textContent = '';
         if (!itemId || qty<0 || (qty===0 && !feat('allow_zero_qty')) || isNaN(price) || price<0) { alert('اختر صنف وأدخل كمية وسعر صحيح'); return; }
         const item = state.items.find(it => it.id === itemId);
-        if (qty > Number(item.qty || 0)) {
+        const availQty = itemQtyForUser(item);
+        if (qty > availQty) {
+          const others = itemQtyOtherBranches(item);
+          const otherTxt = others.length ? ` — متوفر في: ${others.map(o => `${o.name} (${o.qty})`).join('، ')}` : '';
           if (!feat('allow_negative_stock')) {
-            errEl.textContent = `الكمية أكبر من الرصيد المتوفر (${item.qty})`;
-            logLostSale(itemId, qty, Number(item.qty || 0), 'فاتورة بيع');
+            errEl.textContent = `الكمية أكبر من الرصيد المتوفر (${availQty})${otherTxt}`;
+            logLostSale(itemId, qty, availQty, 'فاتورة بيع');
             return;
           }
-          if (!confirm(`⚠️ الرصيد المتوفر من "${item.name}" هو ${item.qty} فقط — البيع بيخلّي الرصيد بالسالب.\n\nتكمل؟`)) return;
+          if (!confirm(`⚠️ الرصيد المتوفر من "${item.name}" هو ${availQty} فقط — البيع بيخلّي الرصيد بالسالب.${otherTxt}\n\nتكمل؟`)) return;
         }
         const priceBeforeTax = (state.salesForm.price_mode === 'شامل الضريبة' && taxPct > 0) ? price / (1 + taxPct/100) : price;
         if (priceBeforeTax < Number(item.cost || 0)) {
@@ -16283,6 +16417,36 @@ function bindAppEvents() {
         render();
       };
     });
+    if (document.getElementById('new-branch-btn')) document.getElementById('new-branch-btn').onclick = () => { state.branchForm = { active: true }; state.editingBranchId = null; state.showBranchForm = true; render(); };
+    document.querySelectorAll('[data-open-branch]').forEach(btn => {
+      btn.onclick = () => { const b = state.branches.find(x => x.id === btn.dataset.openBranch); state.branchForm = { ...b }; state.editingBranchId = b.id; state.showBranchForm = true; render(); };
+    });
+  }
+  if (state.showBranchForm) {
+    const closeBr = () => { state.showBranchForm = false; render(); };
+    document.getElementById('br-close').onclick = closeBr;
+    document.getElementById('br-cancel').onclick = closeBr;
+    document.getElementById('br-save').onclick = async () => {
+      const name = document.getElementById('br-name').value.trim();
+      if (!name) { alert('اكتب اسم الفرع'); return; }
+      const payload = { name, code: document.getElementById('br-code').value.trim() || null, phone: document.getElementById('br-phone').value.trim() || null,
+        address: document.getElementById('br-address').value.trim() || null, active: state.branchForm?.is_main ? true : document.getElementById('br-active').checked };
+      if (state.editingBranchId) {
+        const { error } = await sb.from('branches').update(payload).eq('id', state.editingBranchId);
+        if (error) { alert('خطأ بالحفظ:\n' + error.message); return; }
+      } else {
+        const { data, error } = await sb.from('branches').insert(payload).select().single();
+        if (error) { alert('خطأ بالحفظ:\n' + error.message); return; }
+        if (document.getElementById('br-create-wh')?.checked && data) {
+          const { error: whErr } = await sb.from('warehouses').insert({ name: `مستودع ${name}`, branch_id: data.id, active: true });
+          if (whErr) showToast('الفرع انحفظ، بس فشل إنشاء مستودعه: ' + whErr.message, 'error');
+        }
+      }
+      logActivity(state.editingBranchId ? 'تعديل فرع' : 'إضافة فرع', name);
+      await loadWarehouses();
+      state.showBranchForm = false;
+      render();
+    };
   }
   if (state.showWarehouseForm) {
     const closeWh = () => { state.showWarehouseForm = false; render(); };
@@ -16295,6 +16459,7 @@ function bindAppEvents() {
         name, code: document.getElementById('wh-code').value.trim() || null,
         address: document.getElementById('wh-address').value.trim() || null,
         active: document.getElementById('wh-active').checked,
+        ...(document.getElementById('wh-branch') ? { branch_id: document.getElementById('wh-branch').value || null } : {}),
       };
       if (state.editingWarehouseId) {
         const { error } = await sb.from('warehouses').update(payload).eq('id', state.editingWarehouseId);
@@ -16324,6 +16489,22 @@ function bindAppEvents() {
       render();
     };
     document.querySelectorAll('[data-open-tr]').forEach(row => { row.onclick = () => { openTransferById(row.dataset.openTr); }; });
+    const trf = (id, key) => { const el = document.getElementById(id); if (el) el.onchange = (ev) => { state[key] = ev.target.value; render(); }; };
+    trf('tr-f-status', 'transferFilterStatus'); trf('tr-f-from', 'transferFilterFrom'); trf('tr-f-to', 'transferFilterTo');
+    if (document.getElementById('tr-f-clear')) document.getElementById('tr-f-clear').onclick = () => { state.transferFilterStatus = ''; state.transferFilterFrom = ''; state.transferFilterTo = ''; render(); };
+    if (document.getElementById('tr-show-pending')) document.getElementById('tr-show-pending').onclick = () => { state.transferFilterStatus = 'مرسل'; render(); };
+    if (document.getElementById('tr-f-excel')) document.getElementById('tr-f-excel').onclick = async () => {
+      const list = filteredTransfers();
+      if (!list.length) { showToast('ما فيه سندات للتصدير', 'error'); return; }
+      const ids = list.map(x => x.id), lines = [];
+      for (let i = 0; i < ids.length; i += 150) {
+        const { data } = await sb.from('warehouse_transfer_items').select('transfer_id, quantity, received_qty, items(sku, name)').in('transfer_id', ids.slice(i, i + 150));
+        lines.push(...(data || []));
+      }
+      const byId = Object.fromEntries(list.map(x => [x.id, x]));
+      const rows = lines.map(l => { const x = byId[l.transfer_id]; return [x.transfer_number, x.transfer_date, x.from?.name || '', branchName(x.from?.branch_id), x.to?.name || '', branchName(x.to?.branch_id), trStatusOf(x) === 'مرسل' ? 'في الطريق' : trStatusOf(x), l.items?.sku || '', l.items?.name || '', Number(l.quantity), l.received_qty == null ? '' : Number(l.received_qty)]; });
+      exportFormattedAccountingSheet('كشف التحويلات المخزنية.xlsx', 'التحويلات', ['رقم السند', 'التاريخ', 'من مستودع', 'فرع المرسِل', 'إلى مستودع', 'فرع المستلِم', 'الحالة', 'رقم الصنف', 'اسم الصنف', 'الكمية المرسلة', 'الكمية المستلمة'], rows);
+    };
   }
   if (state.showTransferForm) {
     const closeTr = () => { state.showTransferForm = false; render(); };
@@ -16347,16 +16528,29 @@ function bindAppEvents() {
       const prev = list[(idx-1+list.length) % list.length];
       if (prev) openTransferById(prev.id);
     };
-    if (document.getElementById('tr-from')) document.getElementById('tr-from').onchange = (ev) => { state.transferForm.from_warehouse_id = ev.target.value; };
-    if (document.getElementById('tr-to')) document.getElementById('tr-to').onchange = (ev) => { state.transferForm.to_warehouse_id = ev.target.value; };
+    if (document.getElementById('tr-from')) document.getElementById('tr-from').onchange = (ev) => { state.transferForm.from_warehouse_id = ev.target.value; if (state.transferForm.to_warehouse_id === ev.target.value) state.transferForm.to_warehouse_id = ''; render(); };
+    if (document.getElementById('tr-to')) document.getElementById('tr-to').onchange = (ev) => { state.transferForm.to_warehouse_id = ev.target.value; render(); };
     if (document.getElementById('tr-date')) document.getElementById('tr-date').onchange = (ev) => { state.transferForm.transfer_date = ev.target.value; };
     wireItemPickBehavior('tr-item-select', 'tr-item-info', 'tr-item-qty', null, null);
+    if (document.getElementById('tr-item-select')) document.getElementById('tr-item-select').addEventListener('change', async (ev) => {
+      const el = document.getElementById('tr-avail'); const id = ev.target.value; const fromWh = state.transferForm.from_warehouse_id;
+      if (!el) return; if (!id || !fromWh) { el.textContent = ''; return; }
+      el.textContent = '...';
+      const have = await trStockIn(id, fromWh);
+      if (document.getElementById('tr-item-select')?.value !== id) return;
+      const used = state.transferForm.lines.filter(l => l.item_id === id).reduce((s2, l) => s2 + Number(l.quantity), 0);
+      el.innerHTML = `المتوفر بالمستودع المرسِل: <span class="mono" style="color:${have - used > 0 ? '#0F6E56' : '#C0392B'};">${have - used}</span>`;
+    });
     if (document.getElementById('tr-add-line')) {
-      document.getElementById('tr-add-line').onclick = () => {
+      document.getElementById('tr-add-line').onclick = async () => {
         const itemId = document.getElementById('tr-item-select').value;
         const qty = Number(document.getElementById('tr-item-qty').value);
         if (!itemId || !qty || qty<=0) { alert('اختر صنف وأدخل كمية صحيحة'); return; }
         const item = state.items.find(it => it.id === itemId);
+        if (!state.transferForm.from_warehouse_id) { alert('اختر المستودع المرسِل أول'); return; }
+        const have = await trStockIn(itemId, state.transferForm.from_warehouse_id);
+        const used = state.transferForm.lines.filter(l => l.item_id === itemId).reduce((s2, l) => s2 + Number(l.quantity), 0);
+        if (qty + used > have) { alert(`رصيد "${item.name}" بالمستودع المرسِل غير كافي — المتوفر ${have - used}`); return; }
         const existingLine = state.transferForm.lines.find(l => l.item_id === itemId);
         if (existingLine) { existingLine.quantity += qty; }
         else { state.transferForm.lines.push({ item_id:itemId, item_name:item.name, sku:item.sku, unit:item.unit, quantity:qty }); }
@@ -16395,11 +16589,21 @@ function bindAppEvents() {
     if (document.getElementById('tr-approve')) {
       document.getElementById('tr-approve').onclick = async () => {
         const f = state.transferForm;
+        const crossBr = !!(state.branchesReady && warehouseBranchId(f.from_warehouse_id) && warehouseBranchId(f.to_warehouse_id) && warehouseBranchId(f.from_warehouse_id) !== warehouseBranchId(f.to_warehouse_id));
+        if (!confirm(crossBr ? 'إرسال البضاعة للفرع؟\n\nالكمية تنقص من المستودع المرسِل الآن، وتنزل عند الفرع المستلِم بعد ما يأكد الاستلام.' : 'اعتماد سند التحويل ينقل الكمية فعلياً بين المستودعين. متابعة؟')) return;
+        const { data: res, error: rpcErr } = await sb.rpc('transfer_send', { p_id: state.editingTransferId });
+        if (!rpcErr) {
+          showToast(res === 'مرسل' ? 'تم الإرسال 🚚 — بانتظار استلام الفرع' : 'تم نقل المخزون ✓');
+          logActivity(res === 'مرسل' ? 'إرسال تحويل لفرع' : 'اعتماد تحويل مخزني', f.transfer_number);
+          await loadTransfers(); await loadWarehouseStockMap(); await openTransferById(state.editingTransferId);
+          return;
+        }
+        if (!/transfer_send|PGRST202|does not exist|function/i.test(rpcErr.message || '')) { alert('تعذّر التحويل:\n' + rpcErr.message); return; }
+        // الطريقة القديمة (لو ملف 18 لم يُشغَّل بعد)
         for (const l of f.lines) {
           const fromStock = await getWarehouseStock(l.item_id, f.from_warehouse_id);
           if (fromStock < l.quantity) { alert(`رصيد "${l.item_name}" بالمستودع المصدر غير كافي (المتوفر: ${fromStock})`); return; }
         }
-        if (!confirm('اعتماد سند التحويل ينقل الكمية فعلياً بين المستودعين. متابعة؟')) return;
         for (const l of f.lines) {
           await adjustWarehouseStock(l.item_id, f.from_warehouse_id, -l.quantity);
           await adjustWarehouseStock(l.item_id, f.to_warehouse_id, l.quantity);
@@ -16408,6 +16612,31 @@ function bindAppEvents() {
         state.transferForm.approved = true;
         await loadTransfers();
         render();
+      };
+    }
+    if (document.getElementById('tr-receive')) {
+      document.getElementById('tr-receive').onclick = async () => {
+        const f = state.transferForm;
+        const lines = [...document.querySelectorAll('[data-tr-recv]')].map(inp => ({ item_id: inp.dataset.trRecv, received_qty: Number(inp.value) }));
+        const bad = lines.find(l => isNaN(l.received_qty) || l.received_qty < 0 || l.received_qty > (f.lines.find(x => x.item_id === l.item_id)?.quantity ?? 0));
+        if (bad) { alert('الكمية المستلمة لازم تكون بين صفر والكمية المرسلة'); return; }
+        const short = lines.filter(l => l.received_qty < (f.lines.find(x => x.item_id === l.item_id)?.quantity ?? 0));
+        if (!confirm(short.length ? `تأكيد الاستلام مع نقص في ${short.length} صنف؟\nالنقص يُخصم من رصيد الصنف.` : 'تأكيد استلام كل الكميات؟')) return;
+        const { data: res, error } = await sb.rpc('transfer_receive', { p_id: state.editingTransferId, p_lines: lines, p_notes: document.getElementById('tr-recv-notes')?.value || null });
+        if (error) { alert('تعذّر الاستلام:\n' + error.message); return; }
+        showToast(res === 'مستلم بنقص' ? 'تم الاستلام — مع تسجيل النقص' : 'تم الاستلام ✓');
+        logActivity('استلام تحويل مخزني', `${f.transfer_number} — ${res}`);
+        await loadTransfers(); await loadWarehouseStockMap(); await loadItems(); await openTransferById(state.editingTransferId);
+      };
+    }
+    if (document.getElementById('tr-cancel-send')) {
+      document.getElementById('tr-cancel-send').onclick = async () => {
+        if (!confirm('إلغاء الإرسال؟ الكمية ترجع للمستودع المرسِل والسند يرجع مسودة.')) return;
+        const { error } = await sb.rpc('transfer_cancel_send', { p_id: state.editingTransferId });
+        if (error) { alert('تعذّر الإلغاء:\n' + error.message); return; }
+        showToast('تم إلغاء الإرسال');
+        logActivity('إلغاء إرسال تحويل', state.transferForm.transfer_number);
+        await loadTransfers(); await loadWarehouseStockMap(); await openTransferById(state.editingTransferId);
       };
     }
   }
@@ -20084,6 +20313,16 @@ function bindAppEvents() {
         } catch (ex) {
           showToast('فشل حذف المستخدم: ' + (ex?.message || String(ex)), 'error');
         }
+      };
+    });
+    document.querySelectorAll('[data-branch-for]').forEach(sel => {
+      sel.onchange = async () => {
+        const u = state.users.find(x => x.id === sel.dataset.branchFor);
+        const { error } = await sb.from('profiles').update({ branch_id: sel.value || null }).eq('id', sel.dataset.branchFor);
+        if (error) { showToast('فشل ربط الفرع: ' + error.message, 'error'); return; }
+        logActivity('ربط مستخدم بفرع', `${u?.username || ''} → ${branchName(sel.value) || 'كل الفروع'}`);
+        showToast('تم ربط المستخدم بالفرع ✓');
+        await loadUsers(); render();
       };
     });
     document.querySelectorAll('[data-role-for]').forEach(sel => {
