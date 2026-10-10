@@ -2106,6 +2106,11 @@ function installBranchPickDelegation() {
     if (pick) { chooseWorkingBranch(pick.dataset.pickBranch); return; }
     if (e.target.closest('[data-branch-chip]')) { state.branchPickOpen = true; state.branchPickClosable = true; render(); return; }
     if (e.target.closest('[data-branch-pick-close]')) { state.branchPickOpen = false; render(); }
+    if (e.target.closest('#new-branch-btn')) { state.branchForm = { active: true }; state.editingBranchId = null; state.showBranchForm = true; render(); return; }
+    const ob = e.target.closest('[data-open-branch]');
+    if (ob) { const b = state.branches.find(x => x.id === ob.dataset.openBranch); if (b) { state.branchForm = { ...b }; state.editingBranchId = b.id; state.showBranchForm = true; render(); } return; }
+    if (e.target.closest('[data-open-branches]')) { openBranchesScreen(); return; }
+    if (e.target.closest('[data-branches-close]')) { state.showBranches = false; render(); }
   });
 }
 installBranchPickDelegation();
@@ -2581,6 +2586,7 @@ const SUBMENUS = {
   'النظام': [
     { header: 'إعدادات المنشأة', icon: 'ti-building-store' },
     { label: 'بيانات الشركة', target: '__company__', icon: 'ti-id' },
+    { label: 'الفروع (المحلات)', target: '__branches__', icon: 'ti-building-store' },
     { label: 'طرق الدفع', target: '__payment_methods__', icon: 'ti-credit-card' },
     { label: 'إعدادات الطباعة', target: '__print_settings__', icon: 'ti-printer' },
     { header: 'المستخدمون', icon: 'ti-users' },
@@ -2639,7 +2645,7 @@ function renderApp() {
             <div class="dropdown-menu" style="position:absolute;top:100%;right:0;background:#fff;border:1px solid #A9A48C;border-radius:0 0 4px 4px;box-shadow:0 6px 16px rgba(0,0,0,0.25);min-width:220px;z-index:20;padding:4px 0;">
               ${(m==='النظام' ? SUBMENUS[m].filter(item =>
                   item.target === '__users__' ? (isAdmin() || canManageUsers())
-                  : item.target === '__perm_matrix__' ? isAdmin()
+                  : item.target === '__perm_matrix__' || item.target === '__branches__' ? isAdmin()
                   : item.target === '__company__' || item.target === '__payment_methods__' || item.target === '__print_settings__' ? canManageCompany()
                   : item.target === '__maintenance__' ? canManageBackup()
                   : item.target === '__designer_panel__' ? isDesigner()
@@ -2665,6 +2671,8 @@ function renderApp() {
   </div>
   ${state.showForm ? renderFormModal() : ''}
   ${state.showUsers ? renderUsersModal() : ''}
+  ${state.showBranches ? renderBranchesModal() : ''}
+  ${state.showBranchForm ? renderBranchFormModal() : ''}
   ${state.branchPickOpen ? renderBranchPicker() : ''}
   ${state.showActivityLog ? renderActivityLogModal() : ''}
   ${state.showPartiesReport ? renderPartiesReportModal() : ''}
@@ -6382,19 +6390,7 @@ function renderWarehousesSection() {
           <div style="flex:1;min-width:220px;"><input id="wh-search" class="input" placeholder="${t('wh_search_ph')}" value="${escapeHtml(state.warehouseQuery)}" /></div>
           <button id="new-wh-btn" class="btn primary" style="padding:8px 14px;">${t('wh_new')}</button>
         </div>
-        ${state.branchesReady && isAdmin() ? `
-        <div style="border:1px solid #DCE3EE;background:#F6F8FB;border-radius:10px;padding:10px 12px;margin-bottom:14px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <div style="font-size:13px;font-weight:700;color:#1B3352;"><i class="ti ti-building-store"></i> الفروع <span style="font-weight:400;font-size:11.5px;color:#6E6D5F;">— كل مستودع يتبع فرع. اربط الموظف بفرعه من «المستخدمين».</span></div>
-            <button id="new-branch-btn" class="btn" style="padding:5px 12px;font-size:12px;">+ فرع جديد</button>
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            ${state.branches.map(b => `<button type="button" data-open-branch="${b.id}" style="border:1px solid ${b.active ? '#B9C7DC' : '#E4C9A0'};background:#fff;border-radius:10px;padding:7px 12px;cursor:pointer;font-family:inherit;text-align:right;">
-              <div style="font-size:12.5px;font-weight:600;color:#1B3352;">${escapeHtml(b.name)} ${b.is_main ? '⭐' : ''} ${b.code ? `<span class="mono" style="font-weight:400;color:#6E6D5F;">(${escapeHtml(b.code)})</span>` : ''}</div>
-              <div style="font-size:11px;color:#6E6D5F;">${state.warehouses.filter(w => w.branch_id === b.id).length} مستودع · ${(state.users || []).filter(u => u.branch_id === b.id).length} موظف${b.doc_prefix ? ` · الترقيم ${escapeHtml(b.doc_prefix)}0001` : ''}${b.active ? '' : ' · موقوف'}</div>
-            </button>`).join('')}
-          </div>
-        </div>` : ''}
+        ${state.branchesReady && isAdmin() ? `<div style="font-size:11.5px;color:#5F5E5A;background:#F6F8FB;border:1px solid #DCE3EE;border-radius:8px;padding:7px 10px;margin-bottom:12px;"><i class="ti ti-building-store"></i> كل مستودع يتبع فرع (محل). إضافة وتعديل الفروع من <b>النظام ← الفروع (المحلات)</b> <button type="button" data-open-branches class="btn" style="padding:2px 10px;font-size:11.5px;margin-right:6px;">فتح الفروع</button></div>` : ''}
         <div style="font-size:12px;color:#5F5E5A;margin-bottom:8px;">${list.length} ${t('menu_warehouses')}</div>
         <div style="border:1px solid #E4E2DA;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(27,51,82,0.06);">
           <div style="display:grid;grid-template-columns:1.3fr 1fr 0.8fr 1.5fr 0.6fr 0.6fr;background:linear-gradient(180deg,#3D6389,#1B3352);color:#fff;font-size:11.5px;font-weight:500;">
@@ -6412,17 +6408,60 @@ function renderWarehousesSection() {
           ${list.length===0 ? `<div style="padding:20px;text-align:center;font-size:12.5px;color:#6E6D5F;">${t('wh_no_results')}</div>` : ''}
         </div>
       </div>
-      ${state.showWarehouseForm ? renderWarehouseFormModal() : ''}
-      ${state.showBranchForm ? renderBranchFormModal() : ''}`;
+      ${state.showWarehouseForm ? renderWarehouseFormModal() : ''}`;
+}
+async function openBranchesScreen() {
+  if (!isAdmin()) { showToast('هذا القسم للمدير فقط'); return; }
+  await loadWarehouses(); await loadUsers();
+  if (!state.partiesAll) await loadParties();
+  state.showBranches = true; render();
+}
+function renderBranchesModal() {
+  if (!state.branchesReady) return `<div style="position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;z-index:11;"><div style="background:#fff;border-radius:12px;padding:20px;max-width:420px;text-align:center;font-size:13px;">الفروع غير مفعّلة في قاعدة البيانات — شغّل ملف 18 ثم 19 ثم 20.<div style="margin-top:12px;"><button data-branches-close class="btn">إغلاق</button></div></div></div>`;
+  const pa = state.partiesAll || [];
+  const stat = (n, l, ic) => `<div style="flex:1;min-width:48px;background:#F6F8FB;border-radius:8px;padding:6px 4px;text-align:center;"><div style="font-weight:700;font-size:15px;color:#1B3352;">${n}</div><div style="font-size:10.5px;color:#6E6D5F;"><i class="ti ${ic}"></i> ${l}</div></div>`;
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;padding:16px;z-index:11;">
+    <div style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:880px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+      <div class="win-title"><span><i class="ti ti-building-store"></i> الفروع (المحلات)</span><button data-branches-close style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
+      <div style="padding:14px 16px;overflow-y:auto;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+          <div style="font-size:12px;color:#5F5E5A;line-height:1.7;">كل فرع محل مستقل: عملاؤه ومورديه وترقيم فواتيره ومستودعه.<br>اربط كل موظف بفرعه من <b>النظام ← المستخدمين</b>.</div>
+          <button id="new-branch-btn" class="btn primary" style="padding:8px 16px;"><i class="ti ti-plus"></i> فرع جديد</button>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;">
+          ${state.branches.map(b => `
+          <div data-open-branch="${b.id}" style="border:1px solid ${b.active !== false ? '#C9D4E3' : '#E4C9A0'};border-radius:12px;padding:12px;cursor:pointer;background:${b.active !== false ? '#fff' : '#FDF8F0'};box-shadow:0 1px 3px rgba(27,51,82,0.06);">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <span style="width:40px;height:40px;border-radius:10px;background:${b.is_main ? '#BA7517' : '#2C4A6E'};color:#fff;display:flex;align-items:center;justify-content:center;font-size:18px;"><i class="ti ${b.is_main ? 'ti-star' : 'ti-building-store'}"></i></span>
+              <div style="flex:1;min-width:0;">
+                <div style="font-weight:700;font-size:14px;color:#1B3352;">${escapeHtml(b.name)}</div>
+                <div style="font-size:11px;color:#6E6D5F;">${b.is_main ? 'الفرع الرئيسي' : 'فرع'}${b.active === false ? ' · <span style="color:#BA7517;">موقوف</span>' : ''}</div>
+              </div>
+              <i class="ti ti-pencil" style="color:#8B8A7A;"></i>
+            </div>
+            ${b.address || b.phone ? `<div style="font-size:11.5px;color:#5F5E5A;margin-bottom:8px;">${b.address ? `<i class="ti ti-map-pin"></i> ${escapeHtml(b.address)} ` : ''}${b.phone ? `<span dir="ltr"><i class="ti ti-phone"></i> ${escapeHtml(b.phone)}</span>` : ''}</div>` : ''}
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              ${stat(pa.filter(p => p.branch_id === b.id && p.party_type === 'customer').length, 'عملاء', 'ti-users')}
+              ${stat(pa.filter(p => p.branch_id === b.id && p.party_type === 'supplier').length, 'موردين', 'ti-truck')}
+              ${stat((state.users || []).filter(u => u.branch_id === b.id).length, 'موظفين', 'ti-user')}
+              ${stat(state.warehouses.filter(w => w.branch_id === b.id).length, 'مستودع', 'ti-building-warehouse')}
+            </div>
+            <div style="font-size:11px;color:#6E6D5F;margin-top:8px;">ترقيم الفواتير: <b class="mono">${b.is_main ? 'يكمل ترقيمه العادي' : escapeHtml((b.doc_prefix || 'N') + '0001')}</b></div>
+          </div>`).join('')}
+        </div>
+      </div>
+    </div>
+  </div>`;
 }
 function renderBranchFormModal() {
   const f = state.branchForm || {};
   return `
   <div id="br-overlay" style="position:fixed;inset:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;padding:16px;z-index:12;">
     <div style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:440px;box-shadow:0 20px 50px rgba(0,0,0,0.3);" onclick="event.stopPropagation()">
-      <div class="win-title"><span>${state.editingBranchId ? 'تعديل فرع' : 'فرع جديد'}</span><button id="br-close" style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
+      <div class="win-title"><span>${state.editingBranchId ? 'تعديل فرع (محل)' : 'فرع جديد (محل)'}</span><button id="br-close" style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
       <div style="padding:16px;display:flex;flex-direction:column;gap:12px;">
-        ${partyField('اسم الفرع *', `<input id="br-name" class="input" value="${escapeHtml(f.name||'')}" placeholder="مثال: فرع جدة" />`)}
+        ${partyField('اسم الفرع (المحل) *', `<input id="br-name" class="input" value="${escapeHtml(f.name||'')}" placeholder="مثال: فرع جدة" />`)}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
           ${partyField('الرمز', `<input id="br-code" class="input" dir="ltr" value="${escapeHtml(f.code||'')}" placeholder="J" />`)}
           ${partyField('الجوال', `<input id="br-phone" class="input" dir="ltr" value="${escapeHtml(f.phone||'')}" />`)}
@@ -6431,7 +6470,7 @@ function renderBranchFormModal() {
           : partyField('رقم الفرع (للترقيم)', `<input id="br-prefix" class="input mono" dir="ltr" style="max-width:90px;" value="${escapeHtml(f.doc_prefix||'')}" placeholder="تلقائي" /> <span style="font-size:11px;color:#6E6D5F;">فواتير الفرع تبدأ بـ <b class="mono">${escapeHtml(f.doc_prefix || 'N')}0001</b></span>`)}
         ${partyField('العنوان', `<input id="br-address" class="input" value="${escapeHtml(f.address||'')}" />`)}
         <label style="font-size:12.5px;"><input id="br-active" type="checkbox" ${f.active!==false?'checked':''} ${f.is_main?'disabled':''} /> نشط</label>
-        ${!state.editingBranchId ? `<label style="font-size:12.5px;background:#F6F8FB;border-radius:8px;padding:8px 10px;"><input id="br-create-wh" type="checkbox" checked /> إنشاء مستودع للفرع تلقائياً بنفس الاسم</label>` : ''}
+        ${!state.editingBranchId ? `<label style="font-size:12.5px;background:#F6F8FB;border-radius:8px;padding:8px 10px;"><input id="br-create-wh" type="checkbox" checked /> إنشاء مستودع للمحل تلقائياً (البضاعة اللي في المحل)</label>` : ''}
       </div>
       <div style="display:flex;gap:8px;padding:10px 16px 16px;border-top:1px solid #A9A48C;">
         ${iconBtn('br-cancel', 'ti-x', '#C0392B', 'الغاء')}
@@ -14222,6 +14261,7 @@ function bindAppEvents() {
         render();
         return;
       }
+      if (target === '__branches__') { await openBranchesScreen(); return; }
       if (target === '__users__') {
         await loadUsers();
         state.showUsers = true;
@@ -16538,10 +16578,6 @@ function bindAppEvents() {
         render();
       };
     });
-    if (document.getElementById('new-branch-btn')) document.getElementById('new-branch-btn').onclick = () => { state.branchForm = { active: true }; state.editingBranchId = null; state.showBranchForm = true; render(); };
-    document.querySelectorAll('[data-open-branch]').forEach(btn => {
-      btn.onclick = () => { const b = state.branches.find(x => x.id === btn.dataset.openBranch); state.branchForm = { ...b }; state.editingBranchId = b.id; state.showBranchForm = true; render(); };
-    });
   }
   if (state.showBranchForm) {
     const closeBr = () => { state.showBranchForm = false; render(); };
@@ -16567,6 +16603,7 @@ function bindAppEvents() {
       }
       logActivity(state.editingBranchId ? 'تعديل فرع' : 'إضافة فرع', name);
       await loadWarehouses();
+      if (state.showBranches) await loadUsers();
       state.showBranchForm = false;
       render();
     };
