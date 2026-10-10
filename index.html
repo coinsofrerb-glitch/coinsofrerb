@@ -584,7 +584,7 @@ function render() {
     bindAuthEvents();
   } else {
     document.querySelectorAll('body > #active-item-bar').forEach(el => el.remove()); // نسخة قديمة أُضيفت مباشرة للصفحة — render يرسم البار من جديد
-    root.innerHTML = renderApp();
+    root.innerHTML = withBranchQty(renderApp);
     bindAppEvents();
     attachWindowDragging();
     applyWindowEntranceAnimation();
@@ -1163,6 +1163,17 @@ async function loadParties() {
   const ub = userBranchId();
   state.parties = ub ? state.partiesAll.filter(p => p.branch_id === ub) : state.partiesAll;
 }
+// مستندات فرع العمل الحالي فقط (المستند بدون فرع = الفرع الرئيسي). كل الفروع = بدون فلترة
+function scopeBranch(list) {
+  const ub = userBranchId(); if (!ub || !Array.isArray(list)) return list || [];
+  const mainId = mainBranchId();
+  return list.filter(x => x.branch_id ? x.branch_id === ub : ub === mainId);
+}
+const BRANCH_SCOPED = ['purchases', 'quotations', 'salesInvoices', 'salesReturns', 'purchaseReturns', 'receiptVouchers', 'paymentVouchers'];
+function refreshBranchScope() {
+  BRANCH_SCOPED.forEach(k => { if (Array.isArray(state[k + 'All'])) state[k] = scopeBranch(state[k + 'All']); });
+  if (Array.isArray(state.partiesAll)) { const ub = userBranchId(); state.parties = ub ? state.partiesAll.filter(p => p.branch_id === ub) : state.partiesAll; }
+}
 function branchFilterDocs(list) { const ub = userBranchId(); return ub ? list.filter(x => !x.branch_id || x.branch_id === ub) : list; }
 
 function filteredParties() {
@@ -1188,7 +1199,7 @@ const emptyPartyForm = () => ({
 // ---------- PURCHASES (المشتريات) ----------
 async function loadPurchases() {
   const { data, error } = await fetchAllQ(() => sb.from('purchase_invoices').select('*, parties(name)').order('created_at', { ascending: false }).order('id'));
-  if (!error) state.purchases = data || [];
+  if (!error) { state.purchasesAll = data || []; state.purchases = scopeBranch(state.purchasesAll); }
 }
 
 function filteredPurchases() {
@@ -1248,6 +1259,12 @@ function renderSummaryCards(results) {
 
 // صافي ربح دقيق للشاشة الرئيسية: مبيعات − تكلفة البضاعة المباعة فعلياً (حساب 5101)، مو كل المشتريات
 async function calcHomeNetProfit() {
+  if (userBranchId()) {
+    // تكلفة المبيعات لفرع العمل فقط: قيود التكلفة المرتبطة بفواتير ومردودات الفرع
+    const ids = new Set([...(state.salesInvoices || []), ...(state.salesReturns || [])].map(x => x.id));
+    const { data: bl } = await fetchAllQ(() => sb.from('journal_entry_lines').select('debit, credit, journal_entries!inner(source_id)').eq('account_code', acc('cogs')).order('id'));
+    return (bl || []).filter(r => ids.has(r.journal_entries?.source_id)).reduce((s, r) => s + Number(r.debit || 0) - Number(r.credit || 0), 0);
+  }
   const { data } = await sb.from('journal_entry_lines').select('debit').eq('account_code', acc('cogs'));
   const totalCogs = (data||[]).reduce((s,r) => s + Number(r.debit||0), 0);
   return totalCogs;
@@ -1532,7 +1549,7 @@ function renderStatementContent(p) {
 // ---------- QUOTATIONS (عروض الأسعار) ----------
 async function loadQuotations() {
   const { data, error } = await sb.from('quotations').select('*, parties(name)').order('created_at', { ascending: false });
-  if (!error) state.quotations = data || [];
+  if (!error) { state.quotationsAll = data || []; state.quotations = scopeBranch(state.quotationsAll); }
 }
 function filteredQuotations() {
   const q = state.quotationQuery.trim().toLowerCase();
@@ -1575,7 +1592,7 @@ async function openQuoteById(id) {
 // ---------- SALES INVOICES (فواتير البيع) ----------
 async function loadSalesInvoices() {
   const { data, error } = await fetchAllQ(() => sb.from('sales_invoices').select('*, parties(name)').order('created_at', { ascending: false }).order('id'));
-  if (!error) state.salesInvoices = data || [];
+  if (!error) { state.salesInvoicesAll = data || []; state.salesInvoices = scopeBranch(state.salesInvoicesAll); }
 }
 function filteredSalesInvoices() {
   const q = state.salesQuery.trim().toLowerCase();
@@ -1613,7 +1630,7 @@ async function openSalesById(id) {
 // ---------- SALES RETURNS (مردود بيع) ----------
 async function loadSalesReturns() {
   const { data, error } = await sb.from('sales_returns').select('*, parties(name)').order('created_at', { ascending: false });
-  if (!error) state.salesReturns = data || [];
+  if (!error) { state.salesReturnsAll = data || []; state.salesReturns = scopeBranch(state.salesReturnsAll); }
 }
 function filteredSalesReturns() {
   const q = state.salesReturnQuery.trim().toLowerCase();
@@ -1647,7 +1664,7 @@ async function openSalesReturnById(id) {
 // ---------- PURCHASE RETURNS (مردود شراء) ----------
 async function loadPurchaseReturns() {
   const { data, error } = await sb.from('purchase_returns').select('*, parties(name)').order('created_at', { ascending: false });
-  if (!error) state.purchaseReturns = data || [];
+  if (!error) { state.purchaseReturnsAll = data || []; state.purchaseReturns = scopeBranch(state.purchaseReturnsAll); }
 }
 function filteredPurchaseReturns() {
   const q = state.purchaseReturnQuery.trim().toLowerCase();
@@ -2020,6 +2037,7 @@ async function loadWarehouses() {
   if (!error) state.warehouses = data || [];
   await loadBranches();
   await loadWarehouseStockMap();
+  refreshBranchScope();
 }
 // ---------- الفروع (المرحلة الأولى) ----------
 async function loadBranches() {
@@ -2060,6 +2078,7 @@ async function chooseWorkingBranch(id) {
   state.activeSection = 'الرئيسية';
   await loadParties();
   await loadWarehouseStockMap();
+  refreshBranchScope();
   state.homeCogs = null;
   showToast(id ? `تشتغل الآن في: ${branchName(id)}` : 'تشتغل الآن على كل الفروع', 'success');
   render();
@@ -2133,6 +2152,13 @@ function itemQtyForUser(it) {
   if (!isBranchUser() || !state.whStock) return Number(it.qty || 0);
   const m = state.whStock[it.id] || {};
   return myWarehouses().reduce((s2, w) => s2 + Number(m[w.id] || 0), 0);
+}
+// أثناء الرسم فقط: كمية كل صنف = رصيد مستودعات فرع العمل (الكمية الكلية ترجع فوراً بعد الرسم، فالحفظ والحسابات ما تتأثر)
+function withBranchQty(fn) {
+  if (!isBranchUser() || !state.whStock || !Array.isArray(state.items)) return fn();
+  const saved = state.items.map(it => it.qty);
+  state.items.forEach(it => { it.qty = itemQtyForUser(it); });
+  try { return fn(); } finally { state.items.forEach((it, i) => { it.qty = saved[i]; }); }
 }
 // رصيد الصنف بالفروع الثانية (للعرض فقط)
 function itemQtyOtherBranches(it) {
@@ -2286,11 +2312,11 @@ function activePaymentMethods() {
 
 async function loadReceiptVouchers() {
   const { data } = await sb.from('receipt_vouchers').select('*, parties(name)').order('created_at', { ascending: false });
-  state.receiptVouchers = data || [];
+  state.receiptVouchersAll = data || []; state.receiptVouchers = scopeBranch(state.receiptVouchersAll);
 }
 async function loadPaymentVouchers() {
   const { data } = await sb.from('payment_vouchers').select('*, parties(name)').order('created_at', { ascending: false });
-  state.paymentVouchers = data || [];
+  state.paymentVouchersAll = data || []; state.paymentVouchers = scopeBranch(state.paymentVouchersAll);
 }
 function newReceiptVoucherForm() { return { voucher_number:'', customer_id:'', amount:'', voucher_date:new Date().toISOString().slice(0,10), payment_method:'نقدي', notes:'', approved:false }; }
 async function openReceiptVoucherById(id) {
