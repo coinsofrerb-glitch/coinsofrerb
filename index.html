@@ -655,6 +655,7 @@ function renderLicenseExpiredScreen() {
       <button id="lic-activate" class="btn primary" style="width:100%;padding:10px;font-size:14px;"><i class="ti ti-key"></i> تفعيل</button>
       <div style="background:#F4F1EA;border:1px solid #DEDACB;border-radius:8px;padding:10px 14px;font-size:12.5px;color:#3A3826;margin-top:14px;">
         ${escapeHtml(state.licenseContact || 'للحصول على سيريال التفعيل تواصل مع المصمم')}
+        <a href="${escapeHtml(renewRequestUrl(''))}" target="_blank" style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:8px;padding:8px;border-radius:8px;background:#25D366;color:#fff;font-weight:700;text-decoration:none;font-size:13px;"><i class="ti ti-brand-whatsapp" style="font-size:18px;"></i> ${reason === 'missing' ? 'اطلب سيريال التفعيل واتساب' : 'اطلب التجديد واتساب'}</a>
         <div class="mono" style="font-size:10.5px;color:#8B8A7A;margin-top:6px;" dir="ltr">ID: ${escapeHtml(currentProjectRef())}</div>
       </div>
     </div>
@@ -2662,6 +2663,7 @@ const SUBMENUS = {
     { label: 'إعدادات الطباعة', target: '__print_settings__', icon: 'ti-printer' },
     { header: 'المستخدمون', icon: 'ti-users' },
     { label: 'المستخدمون والصلاحيات', target: '__users__', icon: 'ti-user-cog' },
+    { label: 'الاشتراك والتجديد', target: '__renew__', icon: 'ti-rosette-discount-check' },
     { label: 'مصفوفة الصلاحيات المتقدمة', target: '__perm_matrix__', icon: 'ti-table-options' },
     { header: 'البيانات', icon: 'ti-database' },
     { label: 'النسخ الاحتياطي والصيانة', target: '__maintenance__', icon: 'ti-cloud-download' },
@@ -2671,6 +2673,7 @@ const SUBMENUS = {
     { label: 'إعادة فتح مستند معتمد', target: '__reopen_doc__', icon: 'ti-lock-open' },
     { label: 'إقفال السنة المالية', target: '__fiscal_lock__', icon: 'ti-calendar-off' },
     { label: 'لوحة المصمم (الترخيص والاشتراك)', target: '__designer_panel__', icon: 'ti-key' },
+    { label: 'لوحة متابعة كل العملاء', target: '__clients_board__', icon: 'ti-heartbeat' },
   ],
 };
 
@@ -2689,6 +2692,7 @@ function renderApp() {
     <div class="no-print" style="background:#FDF6E8;border:1px solid #BA7517;border-radius:6px;padding:8px 14px;margin-bottom:10px;display:flex;align-items:center;gap:8px;font-size:12.5px;color:#3A3826;">
       <i class="ti ti-alert-triangle" style="color:#BA7517;font-size:16px;"></i>
       <span>${state.licenseTrial ? '🧪 نسخة تجريبية — ' : ''}باقي <b>${state.licenseWarningDays}</b> ${state.licenseWarningDays===1?'يوم':'أيام'} على انتهاء ${state.licenseTrial ? 'التجربة' : 'الاشتراك'} (${escapeHtml(state.licenseExpiryDate)}) — ${escapeHtml(state.licenseContact || 'يرجى التواصل مع المصمم للتجديد')}</span>
+      ${isAdmin() ? `<button data-renew-open class="btn" style="margin-right:auto;padding:4px 12px;font-size:12px;background:#25D366;color:#fff;border-color:#25D366;"><i class="ti ti-brand-whatsapp"></i> طلب تجديد</button>` : ''}
     </div>` : ''}
     <div style="border:1px solid #1B3352;border-radius:4px;box-shadow:0 6px 24px rgba(0,0,0,0.35);flex:1;display:flex;flex-direction:column;">
       <div class="win-title" style="border-radius:4px 4px 0 0;">
@@ -2720,6 +2724,8 @@ function renderApp() {
                   : item.target === '__company__' || item.target === '__payment_methods__' || item.target === '__print_settings__' ? canManageCompany()
                   : item.target === '__maintenance__' ? canManageBackup()
                   : item.target === '__designer_panel__' ? isDesigner()
+                  : item.target === '__clients_board__' ? isDesigner() && isMasterCopy()
+                  : item.target === '__renew__' ? isAdmin()
                   : item.target === '__fiscal_lock__' ? isDesigner()
                   : item.target === '__reopen_doc__' ? isDesigner()
                   : item.target === '__sys_features__' ? isDesigner()
@@ -2760,6 +2766,8 @@ function renderApp() {
   ${state.showGeneralLedger ? renderGeneralLedgerModal() : ''}
   ${state.showAccountStatement ? renderAccountStatementModal() : ''}
   ${state.showBranchCompare ? renderBranchCompareModal() : ''}
+  ${state.showClientsBoard ? renderClientsBoard() : ''}
+  ${state.showRenew ? renderRenewModal() : ''}
   ${state.showReportDesigner ? renderReportDesignerModal() : ''}
   ${state.showFixedAssets ? renderFixedAssetsModal() : ''}
   ${state.showEmployees ? renderEmployeesModal() : ''}
@@ -4455,7 +4463,7 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
-const APP_VERSION = '2026.10.10-5';
+const APP_VERSION = '2026.10.10-6';
 function renderHomeSection() {
   const c = state.company || {};
   const phones = [
@@ -11326,7 +11334,8 @@ function renderSerialGenTab() {
       <textarea id="sg-out" class="input mono" dir="ltr" rows="3" readonly style="font-size:11px;">${escapeHtml(g.serial)}</textarea>
       <div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;">
         <button id="sg-copy" class="btn">نسخ السيريال</button>
-        <button id="sg-copymsg" class="btn"><i class="ti ti-brand-whatsapp" style="color:#25D366;"></i> نسخ رسالة للعميل</button>
+        <button id="sg-copymsg" class="btn"><i class="ti ti-copy"></i> نسخ رسالة للعميل</button>
+        <button id="sg-wa" class="btn"><i class="ti ti-brand-whatsapp" style="color:#25D366;"></i> إرسال واتساب للعميل</button>
         ${g.lastProject === currentProjectRef() ? `<button id="sg-activate" class="btn primary">تفعيل على هذه النسخة الآن</button>` : ''}
       </div>
       ${g.msg ? `<div style="font-size:12px;color:#0F6E56;margin-top:6px;">${escapeHtml(g.msg)}</div>` : ''}
@@ -11380,9 +11389,14 @@ function bindSerialGenTab() {
     render();
   };
   if ($('sg-copy')) $('sg-copy').onclick = () => { navigator.clipboard.writeText(g.serial); showToast('✓ تم نسخ السيريال'); };
-  if ($('sg-copymsg')) $('sg-copymsg').onclick = () => {
-    const msg = `السلام عليكم،\n${g.trial ? 'هذا سيريال النسخة التجريبية (14 يوم) من' : 'هذا سيريال تفعيل'} برنامج Coin Soft ERP (كوين سوفت) لـ ${g.client}\nصالح حتى: ${g.expiry}\n\n${g.serial}\n\nطريقة التفعيل: افتح رابط البرنامج، والصق السيريال${g.ownerUser ? `، واكتب:\nاسم المستخدم: ${g.ownerUser}\nكلمة المرور: ${g.ownerPass}` : ''}\nثم اضغط «تفعيل».`;
-    navigator.clipboard.writeText(msg); showToast('✓ تم نسخ الرسالة');
+  const sgMsg = () => `السلام عليكم،\n${g.trial ? 'هذا سيريال النسخة التجريبية (14 يوم) من' : 'هذا سيريال تفعيل'} برنامج Coin Soft ERP (كوين سوفت) لـ ${g.client}\nصالح حتى: ${g.expiry}\n\n${g.serial}\n\n`
+    + (g.ownerUser ? `طريقة التفعيل: افتح رابط البرنامج، والصق السيريال، واكتب:\nاسم المستخدم: ${g.ownerUser}\nكلمة المرور: ${g.ownerPass}\nثم اضغط «تفعيل».`
+                   : `طريقة التفعيل:\n• لو البرنامج شغال: النظام ← الاشتراك والتجديد ← الصق السيريال ← «تفعيل».\n• لو الاشتراك منتهي: افتح البرنامج والصق السيريال في شاشة التفعيل.`);
+  if ($('sg-copymsg')) $('sg-copymsg').onclick = () => { navigator.clipboard.writeText(sgMsg()); showToast('✓ تم نسخ الرسالة'); };
+  if ($('sg-wa')) $('sg-wa').onclick = () => {
+    const c = (state.crmClients || []).find(x => g.lastProject && (x.supabase_url || '').includes(g.lastProject));
+    const phone = c && c.phone ? normalizePhone(c.phone) : '';
+    window.open(`https://wa.me/${phone}?text=${encodeURIComponent(sgMsg())}`, '_blank');
   };
   if ($('sg-activate')) $('sg-activate').onclick = async () => {
     const r = await verifyLicenseSerial(g.serial); if (!r.ok) { showToast(r.reason, 'error'); return; }
@@ -11391,6 +11405,254 @@ function bindSerialGenTab() {
     await applyLicenseFromSerial(g.serial); g.msg = '✓ تم تفعيل السيريال على هذه النسخة'; logActivity('تفعيل سيريال', r.data.e); render();
   };
 }
+
+// =====================================================================
+// لوحة متابعة كل العملاء (للمصمم): يدخل نسخة كل عميل بحساب المصمم ويقرأ حالتها
+// =====================================================================
+function devWhatsApp() { return '249960499777'; } // رقم واتساب المصمم (المبيعات والتجديد)
+function crmClientConfigUrl(c) {
+  const link = String(c.netlify_url || '').trim(); if (!link) return null;
+  try {
+    const u = new URL(/^https?:/.test(link) ? link : 'https://' + link);
+    const code = u.searchParams.get('c');
+    const dir = u.pathname.endsWith('/') ? u.pathname : u.pathname.replace(/[^/]*$/, '');
+    return u.origin + dir + (code ? `clients/${code}.js` : 'config.js');
+  } catch (e) { return null; }
+}
+async function crmResolveKey(c) {
+  if (c.supabase_key) return c.supabase_key;
+  const cfg = crmClientConfigUrl(c); if (!cfg) return null;
+  try {
+    const txt = await (await fetch(cfg + '?v=' + Date.now(), { cache: 'no-store' })).text();
+    const m = txt.match(/SUPABASE_KEY\s*:\s*['"]([^'"]+)['"]/);
+    return m ? m[1] : null;
+  } catch (e) { return null; }
+}
+function serialPayload(serial) {
+  try { return JSON.parse(new TextDecoder().decode(b64urlToBytes(String(serial).split('.')[0]))); } catch (e) { return null; }
+}
+async function checkCrmClient(c) {
+  const H = { at: new Date().toISOString(), ok: false };
+  const url = normalizeSupabaseLink(c.supabase_url || '');
+  if (!url) { H.error = 'ما فيه رابط قاعدة بيانات'; return H; }
+  if (!c.designer_pass) { H.error = 'ما فيه كلمة سر المصمم في بيانات العميل'; return H; }
+  const key = await crmResolveKey(c);
+  if (!key) { H.error = 'ما قدرت أجيب مفتاح الاتصال — اكتبه في بيانات العميل أو صحّح رابط البرنامج'; return H; }
+  H.key = key;
+  const ref = (url.match(/https:\/\/([a-z0-9]+)\./) || [])[1] || 'x';
+  const cl = supabase.createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false, storageKey: 'coinsoft-chk-' + ref } });
+  try {
+    const user = String(c.designer_user || 'coinsoft').trim();
+    const email = user.includes('@') ? user : `${user.toLowerCase()}@retailapp-users.com`;
+    const { error: le } = await cl.auth.signInWithPassword({ email, password: c.designer_pass });
+    if (le) { H.error = /invalid|credentials/i.test(le.message) ? 'اسم المستخدم أو كلمة سر المصمم غلط' : /fetch|network/i.test(le.message) ? 'قاعدة البيانات ما بترد (ممكن موقوفة)' : le.message; return H; }
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1, 12).toISOString().slice(0, 10);
+    const cnt = async (t, f) => { try { let q = cl.from(t).select('id', { count: 'exact', head: true }); if (f) q = f(q); const r = await q; return r.error ? null : r.count; } catch (e) { return null; } };
+    const one = async (t, sel, col) => { try { const r = await cl.from(t).select(sel).order(col, { ascending: false }).limit(1); return r.error ? null : (r.data || [])[0] || null; } catch (e) { return null; } };
+    const single = async (t, sel) => { try { const r = await cl.from(t).select(sel).eq('id', 1).maybeSingle(); return r.error ? null : r.data; } catch (e) { return null; } };
+    const [lic, lastSale, monthInv, users, items, branches, lastBk, lastAct, comp] = await Promise.all([
+      single('license_settings', 'serial, expiry_date'),
+      one('sales_invoices', 'invoice_date, created_at', 'created_at'),
+      cnt('sales_invoices', q => q.gte('invoice_date', monthStart)),
+      cnt('profiles'), cnt('items'), cnt('branches'),
+      one('backup_log', 'taken_at', 'taken_at'),
+      one('activity_log', 'created_at, action', 'created_at'),
+      single('company_settings', 'name_ar'),
+    ]);
+    const pl = lic?.serial ? serialPayload(lic.serial) : null;
+    Object.assign(H, { ok: true, expiry: pl?.e || lic?.expiry_date || null, trial: !!pl?.t, maxUsers: pl?.u || null,
+      lastSale: lastSale?.created_at || lastSale?.invoice_date || null, monthInvoices: monthInv, users, items, branches,
+      lastBackup: lastBk?.taken_at || null, lastActivity: lastAct?.created_at || null, shopName: comp?.name_ar || null });
+  } catch (e) { H.error = 'تعذّر الفحص: ' + (e.message || e); }
+  finally { try { await cl.auth.signOut(); } catch (e) {} }
+  return H;
+}
+async function saveCrmHealth(c, H) {
+  const patch = { health: H, health_at: H.at };
+  if (H.ok && H.key && !c.supabase_key) patch.supabase_key = H.key;
+  if (H.ok && H.expiry && H.expiry !== c.subscription_end) patch.subscription_end = H.expiry;
+  delete H.key;
+  if (state.crmHealthCols !== false) {
+    const r = await sb.from('crm_clients').update(patch).eq('id', c.id);
+    if (r.error && /health|supabase_key/.test(r.error.message || '')) {
+      state.crmHealthCols = false;
+      if (patch.subscription_end) await sb.from('crm_clients').update({ subscription_end: patch.subscription_end }).eq('id', c.id);
+    }
+  } else if (patch.subscription_end) await sb.from('crm_clients').update({ subscription_end: patch.subscription_end }).eq('id', c.id);
+  Object.assign(c, patch, { health: H });
+}
+async function runClientsCheck(onlyId) {
+  const list = (state.crmClients || []).filter(c => !onlyId || c.id === onlyId);
+  state.cbBusy = true; state.cbDone = 0; state.cbTotal = list.length; render();
+  for (const c of list) {
+    state.cbCurrent = c.name; render();
+    const H = await checkCrmClient(c);
+    await saveCrmHealth(c, H);
+    state.cbDone++; render();
+  }
+  state.cbBusy = false; state.cbCurrent = '';
+  showToast(onlyId ? 'تم الفحص ✓' : `تم فحص ${list.length} عميل ✓`); render();
+}
+function cbStatusOf(c) {
+  const H = c.health, d = crmDaysUntil((H && H.expiry) || c.subscription_end);
+  if (c.status === 'متوقف') return { k: 'stopped', l: 'متوقف', bg: '#E4E2DA', fg: '#5F5E5A', ic: 'ti-player-pause' };
+  if (H && !H.ok) return { k: 'down', l: 'ما بيرد', bg: '#FCEBEB', fg: '#C0392B', ic: 'ti-plug-x' };
+  if (d !== null && d < 0) return { k: 'expired', l: 'منتهي', bg: '#FCEBEB', fg: '#C0392B', ic: 'ti-lock' };
+  if (d !== null && d <= 30) return { k: 'soon', l: H && H.trial ? 'تجريبي — قارب' : 'قارب ينتهي', bg: '#FAEEDA', fg: '#BA7517', ic: 'ti-hourglass' };
+  if (!H) return { k: 'unknown', l: 'ما اتفحص', bg: '#F1EFE8', fg: '#8B8A7A', ic: 'ti-question-mark' };
+  const idle = H.lastActivity ? (Date.now() - new Date(H.lastActivity)) / 86400000 : 999;
+  if (idle > 7) return { k: 'idle', l: 'ما شغال (+7 أيام)', bg: '#EEF0F3', fg: '#5B6B7F', ic: 'ti-zzz' };
+  return { k: 'ok', l: H.trial ? 'تجريبي — شغال' : 'شغال', bg: '#E1F5EE', fg: '#0F6E56', ic: 'ti-circle-check' };
+}
+function cbAgo(iso) {
+  if (!iso) return '—';
+  const m = (Date.now() - new Date(iso)) / 60000;
+  if (m < 60) return `قبل ${Math.max(1, Math.round(m))} دقيقة`;
+  if (m < 1440) return `قبل ${Math.round(m / 60)} ساعة`;
+  const dd = Math.round(m / 1440); return dd === 1 ? 'أمس' : `قبل ${dd} يوم`;
+}
+function crmReminderUrl(c) {
+  const H = c.health || {}, exp = H.expiry || c.subscription_end, d = crmDaysUntil(exp);
+  const msg = `السلام عليكم ${c.name} 🌹\n`
+    + (d !== null && d < 0 ? `نحيطكم علماً إن اشتراك برنامج Coin Soft ERP انتهى بتاريخ ${exp}.` : `نذكّركم إن اشتراك برنامج Coin Soft ERP ينتهي بتاريخ ${exp}${d !== null ? ` (باقي ${d} يوم)` : ''}.`)
+    + `\nللتجديد ردّوا على هذه الرسالة بالمدة المطلوبة (شهر / 3 أشهر / 6 أشهر / سنة)، ونرسل ليكم سيريال التجديد.\nشكراً لثقتكم — كوين سوفت`;
+  return `https://wa.me/${c.phone ? normalizePhone(c.phone) : ''}?text=${encodeURIComponent(msg)}`;
+}
+function renderClientsBoard() {
+  const all = state.crmClients || [];
+  const withS = all.map(c => ({ c, st: cbStatusOf(c) }));
+  const count = k => withS.filter(x => x.st.k === k).length;
+  const F = state.cbFilter || 'all';
+  const list = withS.filter(x => F === 'all' ? true : x.st.k === F);
+  const order = { down: 0, expired: 1, soon: 2, idle: 3, unknown: 4, ok: 5, stopped: 6 };
+  list.sort((a, b) => order[a.st.k] - order[b.st.k] || String(a.c.name).localeCompare(String(b.c.name)));
+  const tile = (k, l, n, bg, fg, ic) => `<button data-cb-filter="${k}" style="flex:1;min-width:110px;border:2px solid ${F === k ? fg : 'transparent'};background:${bg};border-radius:12px;padding:10px 12px;cursor:pointer;text-align:right;font-family:inherit;">
+      <div style="font-size:11px;color:${fg};"><i class="ti ${ic}"></i> ${l}</div><div style="font-size:22px;font-weight:800;color:${fg};">${n}</div></button>`;
+  const chip = st => `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:10px;font-size:11px;font-weight:700;background:${st.bg};color:${st.fg};white-space:nowrap;"><i class="ti ${st.ic}"></i>${st.l}</span>`;
+  const td = (v, ex = '') => `<td style="padding:8px 8px;border-bottom:1px solid #EEECE4;font-size:11.5px;vertical-align:middle;${ex}">${v}</td>`;
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:14px;z-index:60;">
+    <div style="background:#fff;border:1px solid #1B3352;border-radius:12px;width:100%;max-width:1180px;max-height:94vh;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+      <div class="win-title"><span><i class="ti ti-heartbeat"></i> لوحة متابعة كل العملاء</span><button data-cb-close style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
+      <div style="padding:12px 16px 0;">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+          ${tile('all', 'كل العملاء', all.length, '#F1F4F9', '#1B3352', 'ti-users')}
+          ${tile('ok', 'شغالين', count('ok'), '#E1F5EE', '#0F6E56', 'ti-circle-check')}
+          ${tile('soon', 'قارب ينتهي', count('soon'), '#FAEEDA', '#BA7517', 'ti-hourglass')}
+          ${tile('expired', 'منتهي', count('expired'), '#FCEBEB', '#C0392B', 'ti-lock')}
+          ${tile('down', 'ما بيرد', count('down'), '#FCEBEB', '#C0392B', 'ti-plug-x')}
+          ${tile('idle', 'ما شغال +7 أيام', count('idle'), '#EEF0F3', '#5B6B7F', 'ti-zzz')}
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+          <button data-cb-run class="btn primary" style="padding:7px 16px;" ${state.cbBusy ? 'disabled' : ''}><i class="ti ti-refresh"></i> فحص كل العملاء الآن</button>
+          ${state.cbBusy ? `<span style="font-size:12px;color:#2C4A6E;"><i class="ti ti-loader-2"></i> جاري فحص ${escapeHtml(state.cbCurrent || '')} (${state.cbDone}/${state.cbTotal})…</span>`
+            : `<span style="font-size:11.5px;color:#6E6D5F;">الفحص يدخل نسخة كل عميل بحساب المصمم ويقرأ: الاشتراك، آخر بيع، آخر نسخة احتياطية، آخر نشاط.</span>`}
+          ${F !== 'all' ? `<button data-cb-filter="all" class="btn" style="padding:4px 10px;font-size:11.5px;margin-right:auto;">عرض الكل</button>` : ''}
+        </div>
+      </div>
+      <div style="padding:0 16px 16px;overflow:auto;">
+        <table style="width:100%;border-collapse:collapse;min-width:980px;">
+          <thead><tr>${['العميل', 'الحالة', 'الاشتراك', 'آخر بيع', 'فواتير الشهر', 'آخر نشاط', 'آخر نسخة احتياطية', 'مستخدمين · أصناف · فروع', 'آخر فحص', ''].map(h => `<th style="position:sticky;top:0;padding:8px;background:#1B3352;color:#fff;font-size:11px;font-weight:500;text-align:right;white-space:nowrap;">${h}</th>`).join('')}</tr></thead>
+          <tbody>
+            ${list.map(({ c, st }) => { const H = c.health || {}; const exp = H.expiry || c.subscription_end; const d = crmDaysUntil(exp); return `<tr>
+              ${td(`<div style="font-weight:700;color:#1B3352;">${escapeHtml(c.name)}</div><div style="font-size:10.5px;color:#8B8A7A;">${escapeHtml([c.city, H.shopName && H.shopName !== c.name ? H.shopName : ''].filter(Boolean).join(' · '))}</div>`)}
+              ${td(chip(st) + (H.error ? `<div style="font-size:10px;color:#C0392B;margin-top:3px;max-width:190px;white-space:normal;">${escapeHtml(H.error)}</div>` : ''))}
+              ${td(exp ? `<span class="mono">${escapeHtml(exp)}</span><div style="font-size:10.5px;color:${d < 0 ? '#C0392B' : d <= 30 ? '#BA7517' : '#0F6E56'};font-weight:700;">${d < 0 ? `منتهي من ${Math.abs(d)} يوم` : `باقي ${d} يوم`}</div>` : '—', 'white-space:nowrap;')}
+              ${td(cbAgo(H.lastSale), 'white-space:nowrap;')}
+              ${td(H.monthInvoices ?? '—', 'font-family:monospace;text-align:center;')}
+              ${td(cbAgo(H.lastActivity), 'white-space:nowrap;')}
+              ${td(H.ok ? (H.lastBackup ? cbAgo(H.lastBackup) : '<span style="color:#BA7517;">ما فيه</span>') : '—', 'white-space:nowrap;')}
+              ${td(H.ok ? `<span class="mono">${H.users ?? '—'}${H.maxUsers ? '/' + H.maxUsers : ''} · ${H.items ?? '—'} · ${H.branches ?? '—'}</span>` : '—', 'white-space:nowrap;')}
+              ${td(`<span style="font-size:10.5px;color:#8B8A7A;">${c.health_at || H.at ? cbAgo(c.health_at || H.at) : 'لسه'}</span>`, 'white-space:nowrap;')}
+              ${td(`<div style="display:flex;gap:4px;justify-content:flex-end;">
+                ${c.netlify_url ? `<a href="${escapeHtml(c.netlify_url)}" target="_blank" class="btn" title="فتح البرنامج" style="padding:4px 8px;font-size:11px;text-decoration:none;"><i class="ti ti-external-link"></i></a>` : ''}
+                <button data-cb-check="${c.id}" class="btn" title="فحص" style="padding:4px 8px;font-size:11px;" ${state.cbBusy ? 'disabled' : ''}><i class="ti ti-refresh"></i></button>
+                ${c.phone ? `<a href="${escapeHtml(crmReminderUrl(c))}" target="_blank" class="btn" title="تذكير بالتجديد واتساب" style="padding:4px 8px;font-size:11px;text-decoration:none;white-space:nowrap;${d !== null && d <= 30 ? 'background:#25D366;color:#fff;border-color:#25D366;' : ''}"><i class="ti ti-brand-whatsapp"></i>${d !== null && d <= 30 ? ' تذكير' : ''}</a>` : ''}
+              </div>`)}
+            </tr>`; }).join('') || `<tr><td colspan="10" style="padding:20px;text-align:center;color:#8B8A7A;font-size:12px;">${all.length ? 'ما فيه عملاء في الفلتر ده' : 'ما فيه عملاء مسجلين — أضفهم من «متابعة العملاء» في لوحة المصمم'}</td></tr>`}
+          </tbody>
+        </table>
+        ${state.crmHealthCols === false ? '<div style="margin-top:8px;font-size:11.5px;color:#A8660A;"><i class="ti ti-info-circle"></i> نتائج الفحص ما بتتحفظ بعد ما تقفل اللوحة — شغّل ملف 22 في قاعدة بياناتك الرئيسية.</div>' : ''}
+      </div>
+    </div>
+  </div>`;
+}
+async function openClientsBoard() {
+  if (!isDesigner()) { showToast('هذا القسم لحساب المصمم فقط'); return; }
+  await loadCrmClients();
+  state.showClientsBoard = true; state.cbFilter = state.cbFilter || 'all'; render();
+}
+
+// =====================================================================
+// تجديد الاشتراك (لصاحب المحل): طلب واتساب بضغطة + تفعيل سيريال التجديد
+// =====================================================================
+function renewRequestUrl(period) {
+  const info = state.licenseInfo || {};
+  const shop = state.company?.name_ar || info.c || '';
+  const who = state.profile?.display_name || state.profile?.username || '';
+  const msg = `السلام عليكم،\nأرغب في ${state.licenseReason === 'missing' && state.licenseExpired ? 'تفعيل' : 'تجديد اشتراك'} برنامج Coin Soft ERP (كوين سوفت)\n\nالمحل: ${shop}\nرقم النسخة: ${currentProjectRef()}\nالاشتراك الحالي ينتهي: ${state.licenseExpiryDate || info.e || '—'}${period ? `\nالمدة المطلوبة: ${period}` : ''}${who ? `\nالمرسل: ${who}` : ''}`;
+  return `https://wa.me/${devWhatsApp()}?text=${encodeURIComponent(msg)}`;
+}
+function renderRenewModal() {
+  const exp = state.licenseExpiryDate, d = exp ? crmDaysUntil(exp) : null, R = state.renew || {};
+  const periods = ['شهر', '3 أشهر', '6 أشهر', 'سنة'];
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:60;">
+    <div style="background:#fff;border-radius:14px;width:100%;max-width:460px;box-shadow:0 20px 50px rgba(0,0,0,0.3);overflow:hidden;">
+      <div style="background:linear-gradient(135deg,#1B3352,#2C4A6E);color:#fff;padding:16px 18px;display:flex;align-items:center;gap:10px;">
+        <i class="ti ti-rosette-discount-check" style="font-size:26px;"></i>
+        <div style="flex:1;"><div style="font-weight:700;font-size:16px;">الاشتراك والتجديد</div><div style="font-size:12px;opacity:.9;">${state.licenseTrial ? '🧪 نسخة تجريبية — ' : ''}${exp ? `ينتهي <span class="mono">${escapeHtml(exp)}</span>${d !== null ? ` · ${d < 0 ? 'منتهي' : `باقي ${d} يوم`}` : ''}` : ''}</div></div>
+        <button data-renew-close style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;"><i class="ti ti-x"></i></button>
+      </div>
+      <div style="padding:16px 18px;">
+        <div style="font-size:13px;font-weight:700;color:#1B3352;margin-bottom:8px;">1) اطلب التجديد</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;">
+          ${periods.map(p => `<button data-renew-period="${p}" class="btn" style="padding:6px 12px;font-size:12.5px;${R.period === p ? 'background:#2C4A6E;color:#fff;border-color:#2C4A6E;' : ''}">${p}</button>`).join('')}
+        </div>
+        <a href="${escapeHtml(renewRequestUrl(R.period))}" target="_blank" class="btn" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:10px;background:#25D366;color:#fff;border-color:#25D366;font-size:14px;font-weight:700;text-decoration:none;"><i class="ti ti-brand-whatsapp" style="font-size:20px;"></i> إرسال طلب التجديد واتساب</a>
+        <div style="font-size:11px;color:#8B8A7A;margin-top:6px;">بيفتح واتساب برسالة جاهزة فيها اسم المحل ورقم النسخة. بعد الدفع بيوصلك سيريال التجديد.</div>
+        <div style="border-top:1px solid #E4E2DA;margin:14px 0 12px;"></div>
+        <div style="font-size:13px;font-weight:700;color:#1B3352;margin-bottom:8px;">2) وصلك سيريال التجديد؟</div>
+        <textarea id="renew-serial" class="input mono" dir="ltr" rows="3" placeholder="الصق السيريال هنا" style="width:100%;font-size:11px;resize:vertical;">${escapeHtml(R.serial || '')}</textarea>
+        ${R.msg ? `<div style="font-size:12px;margin-top:6px;color:${R.ok ? '#0F6E56' : '#C0392B'};">${escapeHtml(R.msg)}</div>` : ''}
+        <button data-renew-activate class="btn primary" style="width:100%;margin-top:8px;padding:9px;"><i class="ti ti-key"></i> تفعيل السيريال</button>
+      </div>
+    </div>
+  </div>`;
+}
+async function activateRenewSerial() {
+  const R = state.renew = state.renew || {};
+  R.serial = (document.getElementById('renew-serial')?.value || '').trim();
+  if (!R.serial) { R.ok = false; R.msg = 'الصق السيريال أولاً'; render(); return; }
+  const r = await verifyLicenseSerial(R.serial);
+  if (!r.ok) { R.ok = false; R.msg = r.reason; render(); return; }
+  if (state.licenseExpiryDate && r.data.e < state.licenseExpiryDate && !confirm(`السيريال ده ينتهي ${r.data.e} — قبل الاشتراك الحالي (${state.licenseExpiryDate}). تفعّله برضه؟`)) return;
+  // دالة التفعيل في قاعدة البيانات (ملف 15) — المدير يقدر يجدد في أي وقت
+  const { data: res, error: rpcErr } = await sb.rpc('activate_license', { p_serial: R.serial, p_owner_user: null, p_owner_pass: null });
+  if (rpcErr && /activate_license|PGRST202|function/i.test(rpcErr.message || '')) {
+    const { error } = await sb.from('license_settings').update({ serial: R.serial, expiry_date: r.data.e }).eq('id', 1);
+    if (error) { R.ok = false; R.msg = 'تعذّر التفعيل: ' + error.message; render(); return; }
+  } else if (rpcErr || (res && res !== 'ok')) { R.ok = false; R.msg = 'تعذّر التفعيل: ' + (rpcErr?.message || res); render(); return; }
+  await applyLicenseFromSerial(R.serial);
+  logActivity('تجديد الاشتراك بسيريال', r.data.e);
+  R.ok = true; R.msg = `✓ تم التجديد — الاشتراك صالح حتى ${r.data.e}`; R.serial = '';
+  render();
+}
+function installRenewDelegation() {
+  if (window.__renewInstalled) return; window.__renewInstalled = true;
+  document.addEventListener('click', e => {
+    if (e.target.closest('[data-renew-open]')) { state.renew = {}; state.showRenew = true; render(); return; }
+    if (e.target.closest('[data-renew-close]')) { state.showRenew = false; render(); return; }
+    const pp = e.target.closest('[data-renew-period]'); if (pp) { state.renew = state.renew || {}; state.renew.period = pp.dataset.renewPeriod; state.renew.serial = document.getElementById('renew-serial')?.value || ''; render(); return; }
+    if (e.target.closest('[data-renew-activate]')) { activateRenewSerial(); return; }
+    if (e.target.closest('[data-open-clients-board]')) { openClientsBoard(); return; }
+    if (e.target.closest('[data-cb-close]')) { state.showClientsBoard = false; render(); return; }
+    if (e.target.closest('[data-cb-run]')) { runClientsCheck(); return; }
+    const ck = e.target.closest('[data-cb-check]'); if (ck) { runClientsCheck(ck.dataset.cbCheck); return; }
+    const cf = e.target.closest('[data-cb-filter]'); if (cf) { state.cbFilter = cf.dataset.cbFilter; render(); return; }
+  });
+}
+installRenewDelegation();
 
 async function recordLicenseInCrm(info, serialNo, note, extra) {
   const ref = info.p || currentProjectRef();
@@ -11437,7 +11699,8 @@ function renderCrmTabContent() {
           ${['الكل','نشط','قارب ينتهي','منتهي','متوقف'].map(s => `<option ${state.crmStatusFilter===s?'selected':''}>${s}</option>`).join('')}
         </select>
       </div>
-      <button id="crm-add-btn" class="btn primary" style="padding:6px 12px;font-size:12px;">+ عميل جديد</button>
+      <div style="display:flex;gap:6px;"><button data-open-clients-board class="btn" style="padding:6px 12px;font-size:12px;border-color:#0F6E56;color:#0F6E56;"><i class="ti ti-heartbeat"></i> لوحة متابعة كل العملاء</button>
+      <button id="crm-add-btn" class="btn primary" style="padding:6px 12px;font-size:12px;">+ عميل جديد</button></div>
     </div>
     <div style="border:1px solid #E4E2DA;border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(27,51,82,0.06);overflow-x:auto;">
       <table style="width:100%;border-collapse:collapse;">
@@ -11492,6 +11755,7 @@ function renderCrmFormBox() {
         ${sec('روابط النسخة')}
         ${row('رابط البرنامج', 'ti-world', `<input id="crm-f-netlify" class="input mono" dir="ltr" value="${escapeHtml(f.netlify_url)}" placeholder="coin  أو  https://....github.io/...?c=coin" />`, 'اكتب <b>رمز المحل</b> فقط (مثل <span class="mono">coin</span>) ويكمل الرابط تلقائياً، أو الصق الرابط كاملاً')}
         ${row('رابط قاعدة البيانات', 'ti-database', `<input id="crm-f-supabase" class="input mono" dir="ltr" value="${escapeHtml(f.supabase_url)}" placeholder="kddckfvzrdfbpcafdmxk  أو  https://xxxx.supabase.co" />`, 'الصق <b>رابط المشروع</b> أو <b>الـ ID فقط</b> (يظهر أسفل شاشة تفعيل العميل) — يُستخدم عند إصدار السيريال')}
+        ${row('مفتاح الاتصال', 'ti-key', `<input id="crm-f-skey" class="input mono" dir="ltr" value="${escapeHtml(f.supabase_key||'')}" placeholder="sb_publishable_... (اختياري)" />`, 'اتركه فاضي — بيتجاب تلقائياً من رابط البرنامج عند الفحص')}
         ${sec('بيانات الدخول (خاصة بك — لا تظهر للعميل)')}
         ${row('دخول المصمم', 'ti-tool', `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;"><input id="crm-f-duser" class="input mono" dir="ltr" placeholder="اسم المستخدم" value="${escapeHtml(f.designer_user||'')}" /><input id="crm-f-dpass" class="input mono" dir="ltr" placeholder="كلمة المرور" value="${escapeHtml(f.designer_pass||'')}" /></div>`, 'حسابك أنت في نسخة هذا العميل (مدير النظام)')}
         ${row('دخول صاحب المحل', 'ti-user-check', `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;"><input id="crm-f-ouser" class="input mono" dir="ltr" placeholder="اسم المستخدم" value="${escapeHtml(f.owner_user||'')}" /><input id="crm-f-opass" class="input mono" dir="ltr" placeholder="كلمة المرور" value="${escapeHtml(f.owner_pass||'')}" /></div>`, 'حساب مدير الشركة الذي أعطيته للعميل')}
@@ -14536,6 +14800,8 @@ function bindAppEvents() {
         return;
       }
       if (target === '__branches__') { await openBranchesScreen(); return; }
+      if (target === '__renew__') { state.renew = {}; state.showRenew = true; render(); return; }
+      if (target === '__clients_board__') { await openClientsBoard(); return; }
       if (target === '__users__') {
         await loadUsers();
         state.showUsers = true;
@@ -18063,12 +18329,14 @@ function bindAppEvents() {
           status: document.getElementById('crm-f-status').value,
           notes: document.getElementById('crm-f-notes').value.trim(),
         };
+        if (state.crmHealthCols !== false && document.getElementById('crm-f-skey')) f.supabase_key = document.getElementById('crm-f-skey').value.trim() || null;
         if (state.crmLoginCols !== false) Object.assign(f, {
           designer_user: document.getElementById('crm-f-duser').value.trim(), designer_pass: document.getElementById('crm-f-dpass').value,
           owner_user: document.getElementById('crm-f-ouser').value.trim(), owner_pass: document.getElementById('crm-f-opass').value });
         if (!f.name) { alert('اكتب اسم العميل'); return; }
         { const save = () => state.crmEditingId ? sb.from('crm_clients').update(f).eq('id', state.crmEditingId) : sb.from('crm_clients').insert(f);
           let r = await save();
+          if (r.error && /supabase_key/.test(r.error.message || '')) { state.crmHealthCols = false; delete f.supabase_key; r = await save(); }
           if (r.error && /designer_|owner_/.test(r.error.message || '')) { state.crmLoginCols = false; ['designer_user','designer_pass','owner_user','owner_pass'].forEach(k => delete f[k]); r = await save(); if (!r.error) showToast('⚠️ حُفظ العميل بدون بيانات الدخول — شغّل ملف 16 في قاعدة بياناتك لتفعيلها', 'error'); }
           if (r.error) { showToast('فشل حفظ بيانات العميل: ' + r.error.message, 'error'); return; } }
         await loadCrmClients();
