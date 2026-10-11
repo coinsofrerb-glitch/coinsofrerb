@@ -2115,6 +2115,10 @@ function userBranchId() {
   if (canAllBranches()) return null;
   return state.profile.branch_id || branchOptions()[0]?.id || null;
 }
+// حد الفروع من السيريال (b): السيريال القديم بدونه = فرع واحد (الرئيسي)، 0 = غير محدود
+function branchLimit() { const b = state.licenseInfo ? state.licenseInfo.b : undefined; return b == null ? 1 : Number(b) || 0; }
+function branchesActiveCount(exceptId) { return (state.branches || []).filter(b => b.active !== false && b.id !== exceptId).length; }
+function branchLimitReached(exceptId) { const lim = branchLimit(); return lim > 0 && !isDesigner() && branchesActiveCount(exceptId) >= lim; }
 function branchPickNeeded() { return (state.branches || []).filter(b => b.active !== false).length > 1 && branchOptions().length > 1; }
 async function chooseWorkingBranch(id) {
   id = id || null;
@@ -2546,23 +2550,22 @@ function canManageUsers() {
 // يحمّل صلاحيات المستخدم الحالي الفعلية لكل الشاشات (دمج صلاحية مجموعته + أي استثناء خاص فيه) — تُحفظ بالذاكرة عشان الفحص يصير فوري بدون استعلام لكل زر
 async function loadMyPermissions() {
   state.myPermissions = {};
-  if (isAdmin()) return; // المدير عنده كل الصلاحيات دايماً، ما يحتاج نحمّل شي
-  if (!state.profile?.role_id) return; // ما انربط بمجموعة بعد — يبقى بدون صلاحيات مفصّلة (يعتمد على النظام القديم البسيط)
-  const { data: screens } = await sb.from('permission_screens').select('id, screen_key');
-  const { data: rolePerms } = await sb.from('role_permissions').select('*').eq('role_id', state.profile.role_id);
-  const { data: userPerms } = await sb.from('user_permissions').select('*').eq('user_id', state.session.user.id);
+  if (isAdmin() || !state.session) return; // المدير عنده كل الصلاحيات دايماً
+  const { data: screens } = await sb.from('permission_screens').select('id, screen_key, screen_group');
   const screenIdToKey = {};
-  (screens || []).forEach(s => { screenIdToKey[s.id] = s.screen_key; });
+  (screens || []).forEach(s => { if ((s.screen_group || 'main') !== 'hidden' && !Object.values(screenIdToKey).includes(s.screen_key)) screenIdToKey[s.id] = s.screen_key; });
   const merged = {};
-  (rolePerms || []).forEach(rp => { const key = screenIdToKey[rp.screen_id]; if (key) merged[key] = { ...rp }; });
-  // صلاحيات المستخدم الخاصة تتغلّب على صلاحية المجموعة، عمود عمود (NULL يعني "بدون استثناء هنا")
+  // 1) صلاحيات المجموعة (لو المستخدم مربوط بمجموعة)
+  if (state.profile?.role_id) {
+    const { data: rolePerms } = await sb.from('role_permissions').select('*').eq('role_id', state.profile.role_id);
+    (rolePerms || []).forEach(rp => { const key = screenIdToKey[rp.screen_id]; if (key) merged[key] = { ...rp }; });
+  }
+  // 2) صلاحيات المستخدم الخاصة تتغلّب على المجموعة
+  const { data: userPerms } = await sb.from('user_permissions').select('*').eq('user_id', state.session.user.id);
   (userPerms || []).forEach(up => {
-    const key = screenIdToKey[up.screen_id];
-    if (!key) return;
-    if (!merged[key]) merged[key] = {};
-    ['can_read','can_add','can_edit','can_delete','can_print','can_approve'].forEach(k => {
-      if (up[k] !== null && up[k] !== undefined) merged[key][k] = up[k];
-    });
+    const key = screenIdToKey[up.screen_id]; if (!key) return;
+    merged[key] = { ...(merged[key] || {}) };
+    ['can_read','can_add','can_edit','can_delete','can_print','can_approve'].forEach(k => { if (up[k] !== null && up[k] !== undefined) merged[key][k] = up[k]; });
   });
   state.myPermissions = merged;
 }
@@ -2573,9 +2576,51 @@ async function loadMyPermissions() {
 function hasPerm(screenKey, action) {
   if (isAdmin()) return true;
   const perms = state.myPermissions?.[screenKey];
-  if (!perms) return true; // ما فيه صف صلاحيات مسجّل لهذي الشاشة لهذا المستخدم — نسمح افتراضياً (توافق مع الشاشات القديمة)
-  return !!perms[action];
+  if (perms && perms[action] !== null && perms[action] !== undefined) return !!perms[action];
+  // بدون إعداد في المصفوفة: الاعتماد والإلغاء حسب خيار «اعتماد الفواتير والسندات» في المستخدمين، والباقي مسموح
+  if (action === 'can_approve' || action === 'can_delete') return !!state.profile?.can_approve;
+  return true;
 }
+// الشاشة المرتبطة بكل قائمة (لصلاحية «قراءة»)
+const SCREEN_OF_TARGET = {
+  'الاصناف': 'items', 'العملاء والموردين': 'parties', '__quotations__': 'quotation', 'المبيعات': 'sales_invoice',
+  '__sales_returns__': 'sales_return', 'المشتريات': 'purchase_invoice', '__purchase_returns__': 'purchase_return',
+  '__receipt_vouchers__': 'receipt_voucher', '__payment_vouchers__': 'payment_voucher', '__settlement_voucher__': 'settlement_voucher',
+  '__cash_disbursement__': 'cash_disbursement', '__warehouses__': 'warehouses', '__stock_counts__': 'stock_count',
+  '__transfers__': 'warehouse_transfer', '__manual_journal__': 'journal_manual',
+};
+function canOpenTarget(t) { const k = SCREEN_OF_TARGET[t]; return !k || hasPerm(k, 'can_read'); }
+// أزرار الحفظ/الاعتماد في كل الشاشات: نتحقق من الصلاحية قبل ما يشتغل الزر (إضافة لمستند جديد، تعديل لمستند موجود)
+const PERM_BUTTONS = {
+  'sales-save': ['sales_invoice', () => state.editingSalesId], 'sales-approve': ['sales_invoice', null, 'can_approve'],
+  'purchase-save': ['purchase_invoice', () => state.editingPurchaseId], 'purchase-approve': ['purchase_invoice', null, 'can_approve'],
+  'quote-save': ['quotation', () => state.editingQuoteId], 'quote-convert': ['sales_invoice', () => null],
+  'sr-save': ['sales_return', () => state.editingSalesReturnId], 'sr-approve': ['sales_return', null, 'can_approve'],
+  'pr-save': ['purchase_return', () => state.editingPurchaseReturnId], 'pr-approve': ['purchase_return', null, 'can_approve'],
+  'rv-save': ['receipt_voucher', () => state.editingReceiptVoucherId], 'rv-approve': ['receipt_voucher', null, 'can_approve'],
+  'pv-save': ['payment_voucher', () => state.editingPaymentVoucherId], 'pv-approve': ['payment_voucher', null, 'can_approve'],
+  'stv-save': ['settlement_voucher', () => state.editingSettlementVoucherId], 'stv-approve': ['settlement_voucher', null, 'can_approve'],
+  'cdv-save': ['cash_disbursement', () => state.editingCashDisbursementId], 'cdv-approve': ['cash_disbursement', null, 'can_approve'],
+  'sc-save': ['stock_count', () => state.editingStockCountId], 'sc-approve': ['stock_count', null, 'can_approve'],
+  'tr-save': ['warehouse_transfer', () => state.editingTransferId], 'tr-approve': ['warehouse_transfer', null, 'can_approve'],
+  'party-save': ['parties', () => state.editingPartyId], 'form-save': ['items', () => state.editingId],
+  'wh-save': ['warehouses', () => state.editingWarehouseId], 'mj-save': ['journal_manual', () => state.editingJournalEntryId],
+};
+const PERM_LABEL = { can_read: 'فتح', can_add: 'إضافة', can_edit: 'تعديل', can_delete: 'إلغاء/حذف', can_print: 'طباعة', can_approve: 'اعتماد' };
+function installPermGuard() {
+  if (window.__permGuard) return; window.__permGuard = true;
+  document.addEventListener('click', e => {
+    const btn = e.target.closest && e.target.closest('button[id]'); if (!btn || isAdmin()) return;
+    const cfg = PERM_BUTTONS[btn.id]; if (!cfg) return;
+    const [screen, idFn, fixed] = cfg;
+    const action = fixed || (idFn && idFn() ? 'can_edit' : 'can_add');
+    if (!hasPerm(screen, action)) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      showToast(`ما عندك صلاحية «${PERM_LABEL[action]}» في هذه الشاشة — اطلبها من المدير`, 'error');
+    }
+  }, true);
+}
+installPermGuard();
 
 // ---------- MAIN APP ----------
 async function loadItems() {
@@ -2744,6 +2789,8 @@ function renderApp() {
       </div>
       <div style="background:#fff;border-bottom:1px solid #A9A48C;display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:0 8px;position:relative;">
         <div style="padding:0 4px;">${langToggleBtn(false)}</div>
+        <button data-tool-open="calc" style="background:none;border:none;cursor:pointer;padding:8px 8px;display:flex;align-items:center;" title="الآلة الحاسبة"><i class="ti ti-calculator" style="font-size:18px;color:#3A3826;"></i></button>
+        <button data-tool-open="notes" style="background:none;border:none;cursor:pointer;padding:8px 8px;display:flex;align-items:center;" title="المفكرة"><i class="ti ti-notes" style="font-size:18px;color:#3A3826;"></i></button>
         <button id="alerts-bell-btn" style="position:relative;background:none;border:none;cursor:pointer;padding:8px 10px;display:flex;align-items:center;" title="التنبيهات">
           <i class="ti ti-bell" style="font-size:18px;color:#3A3826;"></i>
           ${state.alerts && state.alerts.length ? `<span style="position:absolute;top:3px;left:4px;background:#D9534F;color:#fff;font-size:9px;font-weight:700;border-radius:999px;min-width:15px;height:15px;display:flex;align-items:center;justify-content:center;padding:0 3px;">${state.alerts.length}</span>` : ''}
@@ -2775,7 +2822,7 @@ function renderApp() {
                   : item.target === '__sys_features__' ? isDesigner()
                   : item.target === '__account_mapping__' ? isDesigner()
                   : true
-                ) : SUBMENUS[m]).filter(item => item.divider || item.header || (menuFeatureOk(item.target) && (item.target !== '__cash_recon__' || isAdmin() || canApprove()) && (item.target !== '__branch_compare__' || (isAdmin() && (state.branches || []).filter(b => b.active !== false).length > 1))))
+                ) : SUBMENUS[m]).filter(item => item.divider || item.header || (menuFeatureOk(item.target) && canOpenTarget(item.target) && (item.target !== '__cash_recon__' || isAdmin() || canApprove()) && (item.target !== '__branch_compare__' || (isAdmin() && (state.branches || []).filter(b => b.active !== false).length > 1))))
                   .filter((item, i, arr) => !item.header || (arr[i + 1] && !arr[i + 1].header && !arr[i + 1].divider))
                   .map(item => item.header
                 ? `<div style="display:flex;align-items:center;gap:6px;padding:8px 14px 4px;font-size:11px;font-weight:700;color:#8B8A7A;letter-spacing:.2px;border-top:1px solid #EEECE4;margin-top:2px;"><i class="ti ${item.icon || 'ti-point'}" style="font-size:13px;"></i>${item.header}</div>`
@@ -2925,7 +2972,7 @@ function renderPartiesSection() {
                 <button data-edit-party="${p.id}" style="border:1px solid #E4E2DA;background:#F0F6FC;border-radius:8px;width:28px;height:28px;cursor:pointer;color:#2C4A6E;box-shadow:0 1px 2px rgba(27,51,82,0.08);transition:transform 0.1s ease;">✎</button>
                 ${Number(p.balance) !== 0
                   ? `<button disabled title="ما يمكن الحذف — عنده رصيد ${fmt(p.balance)} (يعني له معاملات مسجّلة)" style="border:1px solid #E4E2DA;background:#F4F1EA;border-radius:8px;width:28px;height:28px;cursor:not-allowed;color:#C7C4B4;">✕</button>`
-                  : `<button data-del-party="${p.id}" style="border:1px solid #F5D5D0;background:#FCEBEB;border-radius:8px;width:28px;height:28px;cursor:pointer;color:#C0392B;box-shadow:0 1px 2px rgba(192,57,43,0.08);transition:transform 0.1s ease;">✕</button>`}
+                  : !hasPerm('parties','can_delete') ? '' : `<button data-del-party="${p.id}" style="border:1px solid #F5D5D0;background:#FCEBEB;border-radius:8px;width:28px;height:28px;cursor:pointer;color:#C0392B;box-shadow:0 1px 2px rgba(192,57,43,0.08);transition:transform 0.1s ease;">✕</button>`}
               </div>
             </div>`; }).join('')}
           ${list.length === 0 ? `<div style="padding:20px;text-align:center;font-size:12.5px;color:#6E6D5F;">${t('no_results')}</div>` : ''}
@@ -3754,7 +3801,7 @@ function renderPurchaseFormModal() {
             <button id="purchase-print" type="button" class="sx-btn" ${(!state.editingPurchaseId || !hasPerm('purchase_invoice','can_print'))?'disabled':''}><i class="ti ti-printer" style="color:#2C4A6E;"></i>طباعة</button>
             <button id="purchase-prev" type="button" class="sx-btn" ${state.purchases.length===0?'disabled':''}><i class="ti ti-arrow-big-right" style="color:#27AE60;"></i>${t('btn_prev')}</button>
             <button id="purchase-next" type="button" class="sx-btn" ${state.purchases.length===0?'disabled':''}><i class="ti ti-arrow-big-left" style="color:#27AE60;"></i>${t('btn_next')}</button>
-            ${(!f.approved && state.editingPurchaseId && (canApprove() || hasPerm('purchase_invoice','can_approve'))) ? `<button id="purchase-approve" type="button" class="sx-btn"><i class="ti ti-lock" style="color:#0F6E56;"></i>ترحيل</button>` : ''}
+            ${(!f.approved && state.editingPurchaseId && hasPerm('purchase_invoice','can_approve')) ? `<button id="purchase-approve" type="button" class="sx-btn"><i class="ti ti-lock" style="color:#0F6E56;"></i>ترحيل</button>` : ''}
             ${(f.approved && state.editingPurchaseId && isDesigner()) ? `<button id="purchase-unlock" type="button" class="sx-btn"><i class="ti ti-lock-open" style="color:#C0392B;"></i>${t('unlock_btn')}</button>` : ''}
             ${hasPerm('purchase_invoice','can_print') ? `<button id="purchase-pdf" type="button" class="sx-btn" ${!state.editingPurchaseId?'disabled':''}><i class="ti ti-file-type-pdf" style="color:#D9534F;"></i>PDF</button>` : ''}
             <button id="purchase-exit" type="button" class="sx-btn"><i class="ti ti-door-exit" style="color:#C0392B;"></i>${t('btn_exit')}</button>
@@ -4507,7 +4554,7 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
-const APP_VERSION = '2026.10.11-1';
+const APP_VERSION = '2026.10.11-3';
 function renderHomeSection() {
   const c = state.company || {};
   const phones = [
@@ -5762,7 +5809,7 @@ function renderSalesFormModal() {
             <button id="sales-receipts" type="button" class="sx-btn" ${(!state.editingSalesId || !f.customer_id)?'disabled':''} title="سند قبض لهذه الفاتورة"><i class="ti ti-receipt" style="color:#5F5E5A;"></i>وصولات</button>
             <button id="sales-prev" type="button" class="sx-btn" ${state.salesInvoices.length===0?'disabled':''}><i class="ti ti-arrow-big-right" style="color:#27AE60;"></i>${t('btn_prev')}</button>
             <button id="sales-next" type="button" class="sx-btn" ${state.salesInvoices.length===0?'disabled':''}><i class="ti ti-arrow-big-left" style="color:#27AE60;"></i>${t('btn_next')}</button>
-            ${(!f.approved && state.editingSalesId && (canApprove() || hasPerm('sales_invoice','can_approve'))) ? `<button id="sales-approve" type="button" class="sx-btn"><i class="ti ti-lock" style="color:#0F6E56;"></i>ترحيل</button>` : ''}
+            ${(!f.approved && state.editingSalesId && hasPerm('sales_invoice','can_approve')) ? `<button id="sales-approve" type="button" class="sx-btn"><i class="ti ti-lock" style="color:#0F6E56;"></i>ترحيل</button>` : ''}
             ${(f.approved && state.editingSalesId && isDesigner()) ? `<button id="sales-unlock" type="button" class="sx-btn"><i class="ti ti-lock-open" style="color:#C0392B;"></i>${t('unlock_btn')}</button>` : ''}
             ${hasPerm('sales_invoice','can_print') ? `<button id="sales-pdf" type="button" class="sx-btn" ${!state.editingSalesId?'disabled':''}><i class="ti ti-file-type-pdf" style="color:#D9534F;"></i>PDF</button>` : ''}
             <button id="sales-exit" type="button" class="sx-btn"><i class="ti ti-door-exit" style="color:#C0392B;"></i>${t('btn_exit')}</button>
@@ -6184,7 +6231,7 @@ function renderSalesReturnFormModal() {
         <div style="display:grid;grid-template-columns:1fr 160px 250px;gap:14px;margin-top:10px;align-items:end;">
           <div style="display:flex;gap:3px;flex-wrap:nowrap;align-items:flex-end;overflow-x:auto;">
             ${f.approved ? '' : `<button id="sr-save" type="button" class="sx-btn"><i class="ti ti-device-floppy" style="color:#1B5FA8;"></i>حفظ</button>`}
-            ${(!f.approved && state.editingSalesReturnId && (canApprove() || hasPerm('sales_return','can_approve'))) ? `<button id="sr-approve" type="button" class="sx-btn"><i class="ti ti-lock" style="color:#0F6E56;"></i>ترحيل</button>` : ''}
+            ${(!f.approved && state.editingSalesReturnId && hasPerm('sales_return','can_approve')) ? `<button id="sr-approve" type="button" class="sx-btn"><i class="ti ti-lock" style="color:#0F6E56;"></i>ترحيل</button>` : ''}
             <button id="sr-print" type="button" class="sx-btn" ${(!state.editingSalesReturnId || !hasPerm('sales_return','can_print'))?'disabled':''}><i class="ti ti-printer" style="color:#2C4A6E;"></i>طباعة</button>
             ${hasPerm('sales_return','can_print') ? `<button id="sr-pdf" type="button" class="sx-btn" ${!state.editingSalesReturnId?'disabled':''}><i class="ti ti-file-type-pdf" style="color:#D9534F;"></i>PDF</button>` : ''}
             <button id="sr-prev" type="button" class="sx-btn" ${state.salesReturns.length===0?'disabled':''}><i class="ti ti-arrow-big-right" style="color:#27AE60;"></i>${t('btn_prev')}</button>
@@ -6380,7 +6427,7 @@ function renderPurchaseReturnFormModal() {
         <div style="display:grid;grid-template-columns:1fr 160px 250px;gap:14px;margin-top:10px;align-items:end;">
           <div style="display:flex;gap:3px;flex-wrap:nowrap;align-items:flex-end;overflow-x:auto;">
             ${f.approved ? '' : `<button id="pr-save" type="button" class="sx-btn"><i class="ti ti-device-floppy" style="color:#1B5FA8;"></i>حفظ</button>`}
-            ${(!f.approved && state.editingPurchaseReturnId && (canApprove() || hasPerm('purchase_return','can_approve'))) ? `<button id="pr-approve" type="button" class="sx-btn"><i class="ti ti-lock" style="color:#0F6E56;"></i>ترحيل</button>` : ''}
+            ${(!f.approved && state.editingPurchaseReturnId && hasPerm('purchase_return','can_approve')) ? `<button id="pr-approve" type="button" class="sx-btn"><i class="ti ti-lock" style="color:#0F6E56;"></i>ترحيل</button>` : ''}
             <button id="pr-print" type="button" class="sx-btn" ${(!state.editingPurchaseReturnId || !hasPerm('purchase_return','can_print'))?'disabled':''}><i class="ti ti-printer" style="color:#2C4A6E;"></i>طباعة</button>
             ${hasPerm('purchase_return','can_print') ? `<button id="pr-pdf" type="button" class="sx-btn" ${!state.editingPurchaseReturnId?'disabled':''}><i class="ti ti-file-type-pdf" style="color:#D9534F;"></i>PDF</button>` : ''}
             <button id="pr-prev" type="button" class="sx-btn" ${state.purchaseReturns.length===0?'disabled':''}><i class="ti ti-arrow-big-right" style="color:#27AE60;"></i>${t('btn_prev')}</button>
@@ -6680,9 +6727,10 @@ function renderBranchesModal() {
       <div class="win-title"><span><i class="ti ti-building-store"></i> الفروع (المحلات)</span><button data-branches-close style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
       <div style="padding:14px 16px;overflow-y:auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;">
-          <div style="font-size:12px;color:#5F5E5A;line-height:1.7;">كل فرع محل مستقل: عملاؤه ومورديه وترقيم فواتيره ومستودعه.<br>اربط كل موظف بفرعه من <b>النظام ← المستخدمين</b>.</div>
+          <div style="font-size:12px;color:#5F5E5A;line-height:1.7;">كل فرع محل مستقل: عملاؤه ومورديه وترقيم فواتيره ومستودعه.<br>اربط كل موظف بفرعه من <b>النظام ← المستخدمين</b>.
+            <div style="margin-top:4px;"><span style="display:inline-flex;align-items:center;gap:5px;padding:2px 10px;border-radius:10px;font-weight:700;background:${branchLimitReached() ? '#FAEEDA' : '#E1F5EE'};color:${branchLimitReached() ? '#BA7517' : '#0F6E56'};"><i class="ti ti-building-store"></i> الفروع النشطة: ${branchesActiveCount()} من ${branchLimit() || '∞'} المسموحة في اشتراكك</span></div></div>
           <div style="display:flex;gap:8px;">${state.branches.filter(b => b.active !== false).length > 1 ? '<button data-open-compare class="btn" style="padding:8px 14px;"><i class="ti ti-chart-bar"></i> مقارنة الفروع</button>' : ''}
-          <button id="new-branch-btn" class="btn primary" style="padding:8px 16px;"><i class="ti ti-plus"></i> فرع جديد</button></div>
+          ${branchLimitReached() ? `<button data-renew-open data-renew-reason="branches" class="btn" style="padding:8px 14px;background:#25D366;color:#fff;border-color:#25D366;" title="وصلت للحد المسموح"><i class="ti ti-brand-whatsapp"></i> طلب زيادة الفروع</button>` : `<button id="new-branch-btn" class="btn primary" style="padding:8px 16px;"><i class="ti ti-plus"></i> فرع جديد</button>`}</div>
         </div>
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;">
           ${state.branches.map(b => `
@@ -8229,7 +8277,7 @@ function renderVoucherFormModal(kind) {
         ${iconBtn(`${prefix}-print`, 'ti-printer', '#5F5E5A', 'طباعة', !f.voucher_number || !hasPerm(isReceipt?'receipt_voucher':'payment_voucher','can_print'))}
         ${hasPerm(isReceipt?'receipt_voucher':'payment_voucher','can_print') ? iconBtn(`${prefix}-pdf`, 'ti-file-type-pdf', '#D9534F', 'حفظ PDF (طباعة)', !f.voucher_number) : ''}
         ${f.approved ? '' : iconBtn(`${prefix}-save`, 'ti-device-floppy', '#2C4A6E', 'حفظ')}
-        ${(!f.approved && (isReceipt?state.editingReceiptVoucherId:state.editingPaymentVoucherId) && (canApprove() || hasPerm(isReceipt?'receipt_voucher':'payment_voucher','can_approve'))) ? iconBtn(`${prefix}-approve`, 'ti-lock', '#0F6E56', 'ترحيل') : ''}
+        ${(!f.approved && (isReceipt?state.editingReceiptVoucherId:state.editingPaymentVoucherId) && hasPerm(isReceipt?'receipt_voucher':'payment_voucher','can_approve')) ? iconBtn(`${prefix}-approve`, 'ti-lock', '#0F6E56', 'ترحيل') : ''}
         ${(f.approved && (isReceipt?state.editingReceiptVoucherId:state.editingPaymentVoucherId) && isDesigner()) ? iconBtn(`${prefix}-unlock`, 'ti-lock-open', '#C0392B', t('unlock_btn')) : ''}
       </div>
     </div>
@@ -10247,7 +10295,7 @@ function renderSettlementVoucherModal() {
         ${iconBtn('stv-next', 'ti-player-track-next', '#27AE60', t('btn_next'), sortedVouchers.length===0)}
         ${iconBtn('stv-prev', 'ti-player-track-prev', '#2E86C1', t('btn_prev'), sortedVouchers.length===0)}
         ${!state.editingSettlementVoucherId ? iconBtn('stv-save', 'ti-device-floppy', '#1E5AC0', t('btn_save')) : ''}
-        ${(state.editingSettlementVoucherId && !f.approved && (canApprove() || hasPerm('settlement_voucher','can_approve'))) ? iconBtn('stv-approve', 'ti-lock', '#0F6E56', t('btn_approve')) : ''}
+        ${(state.editingSettlementVoucherId && !f.approved && hasPerm('settlement_voucher','can_approve')) ? iconBtn('stv-approve', 'ti-lock', '#0F6E56', t('btn_approve')) : ''}
         ${(state.editingSettlementVoucherId && f.approved && isDesigner()) ? iconBtn('stv-unlock', 'ti-lock-open', '#C0392B', t('unlock_btn')) : ''}
       </div>
     </div>
@@ -10318,7 +10366,7 @@ function renderCashDisbursementModal() {
         ${iconBtn('cdv-next', 'ti-player-track-next', '#27AE60', t('btn_next'), sortedVouchers.length===0)}
         ${iconBtn('cdv-prev', 'ti-player-track-prev', '#2E86C1', t('btn_prev'), sortedVouchers.length===0)}
         ${(!state.editingCashDisbursementId && hasPerm('cash_disbursement','can_add')) ? iconBtn('cdv-save', 'ti-device-floppy', '#1E5AC0', t('btn_save')) : ''}
-        ${(state.editingCashDisbursementId && !f.approved && (canApprove() || hasPerm('cash_disbursement','can_approve'))) ? iconBtn('cdv-approve', 'ti-lock', '#0F6E56', t('btn_approve')) : ''}
+        ${(state.editingCashDisbursementId && !f.approved && hasPerm('cash_disbursement','can_approve')) ? iconBtn('cdv-approve', 'ti-lock', '#0F6E56', t('btn_approve')) : ''}
       </div>
     </div>
   </div>`;
@@ -10850,6 +10898,14 @@ function renderUsersModal() {
                 ${u.id === state.session.user.id ? '' : `<button data-del-user="${u.id}" style="border:1px solid #F5D5D0;background:#FCEBEB;border-radius:8px;width:28px;height:28px;cursor:pointer;color:#C0392B;box-shadow:0 1px 2px rgba(192,57,43,0.08);transition:transform 0.1s ease;">✕</button>`}
               </div>
             </div>
+            ${u.role !== 'admin' && !u.is_support ? `<div style="padding:4px 8px 6px;display:flex;align-items:center;gap:8px;font-size:11.5px;color:#1B3352;border-top:1px dashed #DEDACB;">
+              <i class="ti ti-shield-lock"></i><span style="font-weight:500;">مجموعة الصلاحيات:</span>
+              <select data-group-for="${u.id}" class="input" style="padding:3px 6px;font-size:11.5px;max-width:200px;">
+                <option value="">بدون مجموعة (الصلاحيات البسيطة تحت)</option>
+                ${(state.permRoles || []).map(r => `<option value="${r.id}" ${u.role_id === r.id ? 'selected' : ''}>${escapeHtml(r.role_name)}</option>`).join('')}
+              </select>
+              <span style="color:#8B8A7A;">${u.role_id ? 'الصلاحيات حسب المجموعة (النظام ← مصفوفة الصلاحيات)' : ''}</span>
+            </div>` : ''}
             <div style="padding:4px 8px 8px 8px;display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:${u.role==='admin'?'#A9A48C':'#5F5E5A'};border-top:1px dashed #DEDACB;">
               <span style="font-weight:500;">صلاحيات إضافية:</span>
               <label><input type="checkbox" data-perm="can_approve" data-perm-user="${u.id}" ${(u.role==='admin'||u.can_approve)?'checked':''} ${u.role==='admin'?'disabled':''} /> اعتماد الفواتير والسندات</label>
@@ -11334,7 +11390,7 @@ function isMasterCopy() { return currentProjectRef() === MASTER_PROJECT_REF; }
 function serialGenDefaults() {
   if (!state.serialGen) {
     const d = new Date(); d.setFullYear(d.getFullYear() + 1);
-    state.serialGen = { ownerUser: '', ownerPass: '', client: '', project: '', expiry: d.toISOString().slice(0, 10), users: '0', trial: false, note: '', serial: '', msg: '', keyName: '' };
+    state.serialGen = { ownerUser: '', ownerPass: '', client: '', project: '', expiry: d.toISOString().slice(0, 10), users: '0', branches: '1', trial: false, note: '', serial: '', msg: '', keyName: '' };
   }
   return state.serialGen;
 }
@@ -11362,6 +11418,7 @@ function renderSerialGenTab() {
         <div style="display:flex;gap:5px;flex-wrap:wrap;">${chips.map(([k, l]) => `<button type="button" data-sg-period="${k}" class="btn" style="padding:4px 10px;font-size:12px;${k === 'trial' ? 'background:#FFF3C4;' : ''}">${l}</button>`).join('')}</div>
         <label style="font-size:12.5px;font-weight:700;">تاريخ الانتهاء</label><input id="sg-expiry" type="date" class="input mono" value="${escapeHtml(g.expiry)}" />
         <label style="font-size:12.5px;font-weight:700;">عدد المستخدمين</label><input id="sg-users" class="input mono" style="max-width:120px;" value="${escapeHtml(g.users)}" title="0 = غير محدود" />
+        <label style="font-size:12.5px;font-weight:700;">عدد الفروع</label><div><input id="sg-branches" class="input mono" style="max-width:120px;" value="${escapeHtml(g.branches ?? '1')}" /><div style="font-size:10.5px;color:#8B8A7A;margin-top:3px;">1 = الفرع الرئيسي بس · 2 = رئيسي + فرع · 0 = غير محدود</div></div>
         <label style="font-size:12.5px;font-weight:700;">نسخة تجريبية</label><label style="font-size:12.5px;display:flex;gap:6px;align-items:center;"><input id="sg-trial" type="checkbox" ${g.trial ? 'checked' : ''} /> يظهر للعميل شريط «نسخة تجريبية»</label>
         <label style="font-size:12.5px;font-weight:700;">حساب صاحب المحل</label>
         <div><div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;"><input id="sg-ouser" class="input mono" dir="ltr" placeholder="اسم المستخدم" value="${escapeHtml(g.ownerUser||'')}" /><input id="sg-opass" class="input mono" dir="ltr" placeholder="كلمة المرور" value="${escapeHtml(g.ownerPass||'')}" /></div>
@@ -11401,7 +11458,7 @@ async function signLicense(data) {
 }
 function bindSerialGenTab() {
   const g = serialGenDefaults(); const $ = id => document.getElementById(id);
-  const read = () => { if (!$('sg-client')) return; g.ownerUser = ($('sg-ouser')?.value || '').trim().toLowerCase(); g.ownerPass = $('sg-opass')?.value || ''; g.client = $('sg-client').value; g.project = $('sg-project').value; g.expiry = $('sg-expiry').value; g.users = $('sg-users').value; g.trial = $('sg-trial').checked; g.note = $('sg-note').value; };
+  const read = () => { if (!$('sg-client')) return; g.ownerUser = ($('sg-ouser')?.value || '').trim().toLowerCase(); g.ownerPass = $('sg-opass')?.value || ''; g.client = $('sg-client').value; g.project = $('sg-project').value; g.expiry = $('sg-expiry').value; g.users = $('sg-users').value; g.branches = $('sg-branches')?.value ?? '1'; g.trial = $('sg-trial').checked; g.note = $('sg-note').value; };
   if ($('sg-keyfile')) $('sg-keyfile').onchange = async (ev) => {
     const f = ev.target.files[0]; if (!f) return;
     try { await loadSerialKeyFile(f); g.keyName = f.name; showToast('✓ تم تحميل المفتاح'); }
@@ -11409,7 +11466,7 @@ function bindSerialGenTab() {
     ev.target.value = ''; render();
   };
   if ($('sg-unload')) $('sg-unload').onclick = () => { __serialSignKey = null; g.keyName = ''; render(); };
-  ['sg-client','sg-project','sg-expiry','sg-users','sg-note','sg-ouser','sg-opass'].forEach(id => { if ($(id)) $(id).oninput = read; });
+  ['sg-client','sg-project','sg-expiry','sg-users','sg-branches','sg-note','sg-ouser','sg-opass'].forEach(id => { if ($(id)) $(id).oninput = read; });
   if ($('sg-trial')) $('sg-trial').onchange = read;
   if ($('sg-this')) $('sg-this').onclick = () => { read(); g.project = currentProjectRef(); g.client = g.client || state.company?.name_ar || ''; render(); };
   document.querySelectorAll('[data-sg-period]').forEach(b => { b.onclick = () => {
@@ -11423,7 +11480,7 @@ function bindSerialGenTab() {
     const ref = (() => { const v = String(g.project || '').trim(); try { if (v.includes('://')) return new URL(v).hostname.split('.')[0]; } catch (e) {} return v.split('.')[0]; })();
     if (!g.client.trim() || !ref || !g.expiry) { showToast('عبّي اسم العميل ورقم نسخته وتاريخ الانتهاء', 'error'); return; }
     if (ref === currentProjectRef() && !confirm('⚠️ الرقم الذي كتبته هو رقم نسختك أنت وليس العميل.\nمتأكد تريد إصدار السيريال لنسختك؟')) return;
-    const data = { v: 1, c: g.client.trim(), p: ref, e: g.expiry, u: Math.max(0, parseInt(g.users || '0', 10) || 0), i: new Date().toISOString().slice(0, 10), n: 'L' + Date.now().toString(36).toUpperCase() };
+    const data = { v: 1, c: g.client.trim(), p: ref, e: g.expiry, u: Math.max(0, parseInt(g.users || '0', 10) || 0), b: Math.max(0, parseInt(g.branches ?? '1', 10) || 0), i: new Date().toISOString().slice(0, 10), n: 'L' + Date.now().toString(36).toUpperCase() };
     if (g.trial) data.t = 1;
     g.serial = await signLicense(data); g.lastProject = ref; g.msg = '';
     logActivity('إصدار سيريال', `${data.c} — ${data.e}${g.trial ? ' (تجريبي)' : ''}`);
@@ -11504,7 +11561,7 @@ async function checkCrmClient(c) {
       single('company_settings', 'name_ar'),
     ]);
     const pl = lic?.serial ? serialPayload(lic.serial) : null;
-    Object.assign(H, { ok: true, expiry: pl?.e || lic?.expiry_date || null, trial: !!pl?.t, maxUsers: pl?.u || null,
+    Object.assign(H, { ok: true, expiry: pl?.e || lic?.expiry_date || null, trial: !!pl?.t, maxUsers: pl?.u || null, maxBranches: pl ? (pl.b == null ? 1 : pl.b) : null,
       lastSale: lastSale?.created_at || lastSale?.invoice_date || null, monthInvoices: monthInv, users, items, branches,
       lastBackup: lastBk?.taken_at || null, lastActivity: lastAct?.created_at || null, shopName: comp?.name_ar || null });
   } catch (e) { H.error = 'تعذّر الفحص: ' + (e.message || e); }
@@ -11606,7 +11663,7 @@ function renderClientsBoard() {
               ${td(H.monthInvoices ?? '—', 'font-family:monospace;text-align:center;')}
               ${td(cbAgo(H.lastActivity), 'white-space:nowrap;')}
               ${td(H.ok ? (H.lastBackup ? cbAgo(H.lastBackup) : '<span style="color:#BA7517;">ما فيه</span>') : '—', 'white-space:nowrap;')}
-              ${td(H.ok ? `<span class="mono">${H.users ?? '—'}${H.maxUsers ? '/' + H.maxUsers : ''} · ${H.items ?? '—'} · ${H.branches ?? '—'}</span>` : '—', 'white-space:nowrap;')}
+              ${td(H.ok ? `<span class="mono">${H.users ?? '—'}${H.maxUsers ? '/' + H.maxUsers : ''} · ${H.items ?? '—'} · ${H.branches ?? '—'}${H.maxBranches ? '/' + H.maxBranches : ''}</span>` : '—', 'white-space:nowrap;')}
               ${td(`<span style="font-size:10.5px;color:#8B8A7A;">${c.health_at || H.at ? cbAgo(c.health_at || H.at) : 'لسه'}</span>`, 'white-space:nowrap;')}
               ${td(`<div style="display:flex;gap:4px;justify-content:flex-end;">
                 ${c.netlify_url ? `<a href="${escapeHtml(c.netlify_url)}" target="_blank" class="btn" title="فتح البرنامج" style="padding:4px 8px;font-size:11px;text-decoration:none;"><i class="ti ti-external-link"></i></a>` : ''}
@@ -11634,7 +11691,7 @@ function renewRequestUrl(period) {
   const info = state.licenseInfo || {};
   const shop = state.company?.name_ar || info.c || '';
   const who = state.profile?.display_name || state.profile?.username || '';
-  const msg = `السلام عليكم،\nأرغب في ${state.licenseReason === 'missing' && state.licenseExpired ? 'تفعيل' : 'تجديد اشتراك'} برنامج Coin Soft ERP (كوين سوفت)\n\nالمحل: ${shop}\nرقم النسخة: ${currentProjectRef()}\nالاشتراك الحالي ينتهي: ${state.licenseExpiryDate || info.e || '—'}${period ? `\nالمدة المطلوبة: ${period}` : ''}${who ? `\nالمرسل: ${who}` : ''}`;
+  const msg = `السلام عليكم،\nأرغب في ${state.licenseReason === 'missing' && state.licenseExpired ? 'تفعيل' : 'تجديد اشتراك'} برنامج Coin Soft ERP (كوين سوفت)\n\nالمحل: ${shop}\nرقم النسخة: ${currentProjectRef()}\nالاشتراك الحالي ينتهي: ${state.licenseExpiryDate || info.e || '—'}${state.renew?.reason === 'branches' ? `\nالطلب: زيادة عدد الفروع (المسموح حالياً ${branchLimit()})` : ''}${period ? `\nالمدة المطلوبة: ${period}` : ''}${who ? `\nالمرسل: ${who}` : ''}`;
   return `https://wa.me/${devWhatsApp()}?text=${encodeURIComponent(msg)}`;
 }
 function renderRenewModal() {
@@ -11685,7 +11742,7 @@ async function activateRenewSerial() {
 function installRenewDelegation() {
   if (window.__renewInstalled) return; window.__renewInstalled = true;
   document.addEventListener('click', e => {
-    if (e.target.closest('[data-renew-open]')) { state.renew = {}; state.showRenew = true; render(); return; }
+    const ro = e.target.closest('[data-renew-open]'); if (ro) { state.renew = { reason: ro.dataset.renewReason || '' }; state.showBranches = false; state.showRenew = true; render(); return; }
     if (e.target.closest('[data-renew-close]')) { state.showRenew = false; render(); return; }
     const pp = e.target.closest('[data-renew-period]'); if (pp) { state.renew = state.renew || {}; state.renew.period = pp.dataset.renewPeriod; state.renew.serial = document.getElementById('renew-serial')?.value || ''; render(); return; }
     if (e.target.closest('[data-renew-activate]')) { activateRenewSerial(); return; }
@@ -11698,12 +11755,208 @@ function installRenewDelegation() {
 }
 installRenewDelegation();
 
+// =====================================================================
+// أدوات سريعة: الآلة الحاسبة + المفكرة (نوافذ عائمة مستقلة عن رسم الصفحة)
+// =====================================================================
+const TOOLS = { lastInput: null, calc: { expr: '', result: '', history: [] }, notes: { list: [], current: null, loaded: false, saving: false, timer: null, useLocal: false } };
+document.addEventListener('focusin', e => {
+  const el = e.target;
+  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && !el.closest('.cs-tool') && !['checkbox', 'radio', 'date', 'file'].includes(el.type)) TOOLS.lastInput = el;
+});
+function toolPanelShell(id, title, icon, body, w) {
+  return `<div id="${id}" class="cs-tool no-print" tabindex="-1" style="position:fixed;bottom:18px;left:18px;width:${w}px;max-width:calc(100vw - 24px);background:#fff;border:1px solid #1B3352;border-radius:14px;box-shadow:0 18px 50px rgba(0,0,0,0.35);z-index:950;overflow:hidden;outline:none;font-family:inherit;">
+    <div data-tool-drag style="background:linear-gradient(135deg,#1B3352,#2C4A6E);color:#fff;padding:8px 12px;display:flex;align-items:center;gap:8px;cursor:move;user-select:none;">
+      <i class="ti ${icon}" style="font-size:17px;"></i><b style="flex:1;font-size:13px;">${title}</b>
+      <button data-tool-close="${id}" style="background:none;border:none;color:#fff;font-size:17px;cursor:pointer;line-height:1;"><i class="ti ti-x"></i></button>
+    </div>${body}</div>`;
+}
+function toolMakeDraggable(panel) {
+  const bar = panel.querySelector('[data-tool-drag]'); if (!bar) return;
+  bar.addEventListener('mousedown', e => {
+    if (e.target.closest('button')) return;
+    const r = panel.getBoundingClientRect(), ox = e.clientX - r.left, oy = e.clientY - r.top;
+    const mv = ev => { panel.style.left = Math.max(0, Math.min(window.innerWidth - 60, ev.clientX - ox)) + 'px'; panel.style.top = Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - oy)) + 'px'; panel.style.bottom = 'auto'; };
+    const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); };
+    document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+  });
+}
+// ---------- الآلة الحاسبة ----------
+function calcEvaluate(expr) {
+  const src = String(expr).replace(/×/g, '*').replace(/÷/g, '/').replace(/,/g, '').replace(/٫/g, '.')
+    .replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d));
+  const toks = src.match(/\d*\.?\d+|[+\-*/%()]/g); if (!toks || toks.join('') !== src.replace(/\s+/g, '')) throw new Error('bad');
+  let i = 0;
+  const peek = () => toks[i], next = () => toks[i++];
+  const factor = () => {
+    const t = next();
+    if (t === '-') return -factor();
+    if (t === '+') return factor();
+    if (t === '(') { const v = expr2(); if (next() !== ')') throw new Error('bad'); return post(v); }
+    if (t !== undefined && /^\d*\.?\d+$/.test(t)) return post(parseFloat(t));
+    throw new Error('bad');
+  };
+  const post = v => { while (peek() === '%') { next(); v = v / 100; } return v; };
+  const term = () => { let v = factor(); while (peek() === '*' || peek() === '/') { const op = next(), r = factor(); v = op === '*' ? v * r : v / r; } return v; };
+  const expr2 = () => { let v = term(); while (peek() === '+' || peek() === '-') { const op = next(), r = term(); v = op === '+' ? v + r : v - r; } return v; };
+  const v = expr2(); if (i !== toks.length || !isFinite(v)) throw new Error('bad');
+  return Math.round(v * 1e8) / 1e8;
+}
+function calcFmt(n) { return Number(n).toLocaleString('en-US', { maximumFractionDigits: 8 }); }
+function renderCalcBody() {
+  const C = TOOLS.calc;
+  const keys = [['C', '⌫', '%', '÷'], ['7', '8', '9', '×'], ['4', '5', '6', '-'], ['1', '2', '3', '+'], ['(', '0', '.', ')'], ['+15%', '-15%', '=']];
+  const kStyle = k => /^[0-9.]$/.test(k) ? 'background:#fff;color:#1F2421;' : k === '=' ? 'background:#0F6E56;color:#fff;grid-column:span 2;' : k === 'C' ? 'background:#FCEBEB;color:#C0392B;' : /15%/.test(k) ? 'background:#FFF8E1;color:#8A5A12;font-size:12px;' : 'background:#EEF3F9;color:#1B3352;';
+  return `<div style="padding:10px;">
+    <div style="background:#F4F6F9;border:1px solid #DCE3EE;border-radius:10px;padding:8px 10px;margin-bottom:8px;text-align:left;" dir="ltr">
+      <div id="calc-expr" class="mono" style="font-size:13px;color:#6E6D5F;min-height:18px;word-break:break-all;">${escapeHtml(C.expr || '0')}</div>
+      <div id="calc-res" class="mono" style="font-size:24px;font-weight:800;color:#1B3352;min-height:30px;">${escapeHtml(C.result !== '' ? C.result : '')}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;" dir="ltr">
+      ${keys.flat().map(k => `<button data-calc-key="${escapeHtml(k)}" style="padding:10px 0;border:1px solid #DCE3EE;border-radius:9px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit;${kStyle(k)}">${k}</button>`).join('')}
+    </div>
+    <div style="display:flex;gap:6px;margin-top:8px;">
+      <button data-calc-copy class="btn" style="flex:1;padding:6px;font-size:12px;"><i class="ti ti-copy"></i> نسخ</button>
+      <button data-calc-insert class="btn" style="flex:1;padding:6px;font-size:12px;" title="يكتب النتيجة في آخر خانة كنت فيها"><i class="ti ti-arrow-bar-to-down"></i> إدراج في الخانة</button>
+    </div>
+    ${C.history.length ? `<div style="margin-top:8px;border-top:1px solid #EEE;padding-top:6px;max-height:110px;overflow-y:auto;">
+      ${C.history.map((h, i) => `<div data-calc-hist="${i}" class="mono" dir="ltr" style="display:flex;justify-content:space-between;gap:8px;font-size:11.5px;padding:3px 4px;border-radius:6px;cursor:pointer;color:#5F5E5A;" title="استخدام النتيجة"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(h.e)}</span><b style="color:#1B3352;">= ${escapeHtml(h.r)}</b></div>`).join('')}
+    </div>` : ''}
+    <div style="font-size:10px;color:#A9A48C;margin-top:6px;text-align:center;">تقدر تستخدم أرقام الكيبورد · Enter = النتيجة · Esc = إغلاق</div>
+  </div>`;
+}
+function calcRefresh() { const p = document.getElementById('cs-calc'); if (!p) return; const body = p.querySelector('[data-tool-body]'); if (body) body.innerHTML = renderCalcBody(); }
+function calcPress(k) {
+  const C = TOOLS.calc;
+  if (k === 'C') { C.expr = ''; C.result = ''; }
+  else if (k === '⌫' || k === 'Backspace') { C.expr = C.expr.slice(0, -1); }
+  else if (k === '=' || k === 'Enter') {
+    if (!C.expr) return;
+    try { const v = calcEvaluate(C.expr); C.result = calcFmt(v); C.history.unshift({ e: C.expr, r: C.result, v }); C.history = C.history.slice(0, 10); C.expr = String(v); }
+    catch (e) { C.result = 'خطأ'; }
+  }
+  else if (k === '+15%' || k === '-15%') {
+    try { const base = calcEvaluate(C.expr || '0'); const v = Math.round(base * (k === '+15%' ? 1.15 : 1 / 1.15) * 100) / 100; C.history.unshift({ e: `${calcFmt(base)} ${k === '+15%' ? '+ VAT 15%' : '- VAT 15%'}`, r: calcFmt(v), v }); C.history = C.history.slice(0, 10); C.result = calcFmt(v); C.expr = String(v); }
+    catch (e) { C.result = 'خطأ'; }
+  }
+  else {
+    const map = { '*': '×', '/': '÷' }; const ch = map[k] || k;
+    if (!/^[0-9.+\-×÷%()]$/.test(ch)) return;
+    if (C.result && C.result !== 'خطأ' && /^[0-9.(]$/.test(ch) && C.expr === String(C.history[0]?.v)) C.expr = '';
+    C.expr += ch; C.result = '';
+    try { if (/[0-9)%]$/.test(C.expr) && /[+\-×÷%]/.test(C.expr.slice(1))) C.result = '= ' + calcFmt(calcEvaluate(C.expr)); } catch (e) {}
+  }
+  calcRefresh();
+}
+function calcValue() { const C = TOOLS.calc; try { return C.expr ? calcEvaluate(C.expr) : 0; } catch (e) { return null; } }
+function openCalc() {
+  if (document.getElementById('cs-calc')) { document.getElementById('cs-calc').focus(); return; }
+  document.body.insertAdjacentHTML('beforeend', toolPanelShell('cs-calc', 'الآلة الحاسبة', 'ti-calculator', '<div data-tool-body></div>', 290));
+  const p = document.getElementById('cs-calc'); calcRefresh(); toolMakeDraggable(p); p.focus();
+  p.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+    if (e.key === 'Escape') { p.remove(); return; }
+    if (/^[0-9.+\-*/%()]$/.test(e.key) || ['Enter', 'Backspace', '='].includes(e.key)) { e.preventDefault(); e.stopPropagation(); calcPress(e.key === '=' ? 'Enter' : e.key); }
+  });
+}
+// ---------- المفكرة ----------
+function notesLocalKey() { return 'coinsoft_notes_' + (state.session?.user?.id || 'x'); }
+async function notesLoad() {
+  const N = TOOLS.notes;
+  const { data, error } = await sb.from('user_notes').select('*').order('pinned', { ascending: false }).order('updated_at', { ascending: false });
+  if (error) { N.useLocal = true; try { N.list = JSON.parse(localStorage.getItem(notesLocalKey()) || '[]'); } catch (e) { N.list = []; } }
+  else { N.useLocal = false; N.list = data || []; }
+  N.loaded = true; if (!N.current && N.list.length) N.current = N.list[0].id;
+}
+function notesSaveLocal() { try { localStorage.setItem(notesLocalKey(), JSON.stringify(TOOLS.notes.list)); } catch (e) {} }
+function noteTitle(n) { const t = String(n.body || '').trim().split('\n')[0]; return t ? t.slice(0, 40) : 'ملاحظة فاضية'; }
+function renderNotesBody() {
+  const N = TOOLS.notes;
+  if (!N.loaded) return '<div style="padding:24px;text-align:center;color:#8B8A7A;font-size:12px;">جاري التحميل…</div>';
+  const cur = N.list.find(n => n.id === N.current);
+  return `<div style="display:flex;height:360px;">
+    <div style="width:150px;border-left:1px solid #E4E2DA;background:#FAF9F5;display:flex;flex-direction:column;">
+      <button data-note-new class="btn primary" style="margin:8px;padding:6px;font-size:12px;"><i class="ti ti-plus"></i> ملاحظة جديدة</button>
+      <div style="flex:1;overflow-y:auto;">
+        ${N.list.map(n => `<div data-note-open="${n.id}" style="padding:7px 10px;cursor:pointer;border-bottom:1px solid #EEECE4;background:${n.id === N.current ? '#EEF3F9' : 'transparent'};">
+          <div style="font-size:12px;font-weight:${n.id === N.current ? 700 : 500};color:#1B3352;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${n.pinned ? '📌 ' : ''}${escapeHtml(noteTitle(n))}</div>
+          <div style="font-size:10px;color:#A9A48C;">${escapeHtml(new Date(n.updated_at || Date.now()).toLocaleString('ar-SA-u-nu-latn', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))}</div>
+        </div>`).join('') || '<div style="padding:12px;font-size:11.5px;color:#8B8A7A;text-align:center;">ما فيه ملاحظات</div>'}
+      </div>
+    </div>
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+      ${cur ? `<textarea id="note-body" class="cs-note-text" placeholder="اكتب ملاحظتك هنا… (بتتحفظ تلقائياً)" style="flex:1;border:none;outline:none;resize:none;padding:12px;font-size:13.5px;line-height:1.8;font-family:inherit;background:#FFFEF7;">${escapeHtml(cur.body || '')}</textarea>
+      <div style="display:flex;align-items:center;gap:6px;padding:6px 8px;border-top:1px solid #EEECE4;font-size:11px;color:#8B8A7A;">
+        <span id="note-status">${N.useLocal ? '💾 محفوظة على الجهاز ده' : '☁️ محفوظة'}</span>
+        <button data-note-pin class="btn" style="margin-right:auto;padding:3px 8px;font-size:11px;">${cur.pinned ? 'إلغاء التثبيت' : '📌 تثبيت'}</button>
+        <button data-note-copy class="btn" style="padding:3px 8px;font-size:11px;"><i class="ti ti-copy"></i></button>
+        <button data-note-del class="btn" style="padding:3px 8px;font-size:11px;color:#C0392B;"><i class="ti ti-trash"></i></button>
+      </div>` : `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#8B8A7A;font-size:12.5px;padding:20px;text-align:center;">اضغط «ملاحظة جديدة» عشان تبدأ</div>`}
+    </div>
+  </div>`;
+}
+function notesRefresh() { const p = document.getElementById('cs-notes'); if (!p) return; p.querySelector('[data-tool-body]').innerHTML = renderNotesBody(); const ta = document.getElementById('note-body'); if (ta) ta.addEventListener('input', notesOnInput); }
+function notesOnInput(e) {
+  const N = TOOLS.notes, cur = N.list.find(n => n.id === N.current); if (!cur) return;
+  cur.body = e.target.value; cur.updated_at = new Date().toISOString();
+  const li = document.querySelector(`[data-note-open="${cur.id}"] div`); if (li) li.textContent = (cur.pinned ? '📌 ' : '') + noteTitle(cur);
+  const st = document.getElementById('note-status'); if (st) st.textContent = '… جاري الحفظ';
+  clearTimeout(N.timer); N.timer = setTimeout(() => notesPersist(cur), 700);
+}
+async function notesPersist(n) {
+  const N = TOOLS.notes;
+  if (N.useLocal) notesSaveLocal();
+  else { const { error } = await sb.from('user_notes').update({ body: n.body, pinned: !!n.pinned, updated_at: n.updated_at }).eq('id', n.id); if (error) { showToast('فشل حفظ الملاحظة: ' + error.message, 'error'); return; } }
+  const st = document.getElementById('note-status'); if (st) st.textContent = N.useLocal ? '💾 محفوظة على الجهاز ده' : '☁️ محفوظة';
+}
+async function notesNew() {
+  const N = TOOLS.notes; let n;
+  if (N.useLocal) { n = { id: 'l' + Date.now(), body: '', pinned: false, updated_at: new Date().toISOString() }; }
+  else { const { data, error } = await sb.from('user_notes').insert({ body: '' }).select().single(); if (error) { showToast('فشل: ' + error.message, 'error'); return; } n = data; }
+  N.list.unshift(n); N.current = n.id; if (N.useLocal) notesSaveLocal();
+  notesRefresh(); document.getElementById('note-body')?.focus();
+}
+async function openNotes() {
+  if (document.getElementById('cs-notes')) { document.getElementById('cs-notes').focus(); return; }
+  document.body.insertAdjacentHTML('beforeend', toolPanelShell('cs-notes', 'المفكرة', 'ti-notes', '<div data-tool-body></div>', 520));
+  const p = document.getElementById('cs-notes'); p.style.left = 'auto'; p.style.right = '18px'; toolMakeDraggable(p);
+  p.addEventListener('keydown', e => { if (e.key === 'Escape') p.remove(); });
+  notesRefresh();
+  await notesLoad(); notesRefresh();
+}
+document.addEventListener('click', async e => {
+  const t = e.target;
+  if (t.closest('[data-tool-open="calc"]')) { openCalc(); return; }
+  if (t.closest('[data-tool-open="notes"]')) { openNotes(); return; }
+  const cl = t.closest('[data-tool-close]'); if (cl) { document.getElementById(cl.dataset.toolClose)?.remove(); return; }
+  const ck = t.closest('[data-calc-key]'); if (ck) { calcPress(ck.dataset.calcKey); document.getElementById('cs-calc')?.focus(); return; }
+  const ch = t.closest('[data-calc-hist]'); if (ch) { const h = TOOLS.calc.history[Number(ch.dataset.calcHist)]; if (h) { TOOLS.calc.expr = String(h.v); TOOLS.calc.result = h.r; calcRefresh(); } return; }
+  if (t.closest('[data-calc-copy]')) { const v = calcValue(); if (v !== null) { navigator.clipboard?.writeText(String(v)); showToast('✓ تم نسخ ' + calcFmt(v)); } return; }
+  if (t.closest('[data-calc-insert]')) {
+    const v = calcValue(), el = TOOLS.lastInput;
+    if (v === null) return;
+    if (!el || !document.body.contains(el)) { showToast('اضغط على الخانة اللي عايز تكتب فيها أولاً، بعدها «إدراج»', 'error'); return; }
+    el.value = String(v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); el.focus();
+    showToast('✓ تم الإدراج'); return;
+  }
+  if (t.closest('[data-note-new]')) { notesNew(); return; }
+  const no = t.closest('[data-note-open]'); if (no) { TOOLS.notes.current = no.dataset.noteOpen; notesRefresh(); return; }
+  const N = TOOLS.notes, cur = N.list.find(n => n.id === N.current);
+  if (t.closest('[data-note-pin]') && cur) { cur.pinned = !cur.pinned; await notesPersist(cur); N.list.sort((a, b) => (b.pinned - a.pinned) || String(b.updated_at).localeCompare(String(a.updated_at))); notesRefresh(); return; }
+  if (t.closest('[data-note-copy]') && cur) { navigator.clipboard?.writeText(cur.body || ''); showToast('✓ تم نسخ الملاحظة'); return; }
+  if (t.closest('[data-note-del]') && cur) {
+    if (!confirm('حذف هذه الملاحظة؟')) return;
+    if (!N.useLocal) { const { error } = await sb.from('user_notes').delete().eq('id', cur.id); if (error) { showToast('فشل الحذف: ' + error.message, 'error'); return; } }
+    N.list = N.list.filter(n => n.id !== cur.id); if (N.useLocal) notesSaveLocal();
+    N.current = N.list[0]?.id || null; notesRefresh(); return;
+  }
+});
+
 async function recordLicenseInCrm(info, serialNo, note, extra) {
   const ref = info.p || currentProjectRef();
   const { data: rows, error: qErr } = await sb.from('crm_clients').select('id').ilike('supabase_url', `%${ref}%`);
   if (qErr) throw qErr;
   const rec = { subscription_start: info.i || new Date().toISOString().slice(0, 10), subscription_end: info.e, status: info.t ? 'تجريبي' : 'نشط',
-                notes: (note ? note + ' — ' : '') + 'سيريال ' + (serialNo || info.n || '') + (info.u ? ` — ${info.u} مستخدم` : '') };
+                notes: (note ? note + ' — ' : '') + 'سيريال ' + (serialNo || info.n || '') + (info.u ? ` — ${info.u} مستخدم` : '') + (info.b != null ? ` — ${info.b ? info.b + ' فرع' : 'فروع غير محدودة'}` : '') };
   const write = (x) => (rows && rows.length) ? sb.from('crm_clients').update(x).eq('id', rows[0].id)
                                             : sb.from('crm_clients').insert({ name: info.c, supabase_url: `https://${ref}.supabase.co`, ...x });
   let r = await write(extra ? { ...rec, ...extra } : rec);
@@ -11908,6 +12161,7 @@ function renderPermMatrixModal() {
     { key: 'discounts', label: 'الخصومات', group: null },
     { key: 'helper', label: 'الشاشة المساعدة', group: 'helper' },
   ];
+  const tabsAll = tabs; tabs.splice(0, tabs.length, ...tabsAll.filter(t => !t.group || state.permScreens.some(s => (s.screen_group || 'main') === t.group)));
   const activeTab = tabs.find(t => t.key === state.permMatrixTab) || tabs[0];
   const tabScreens = activeTab.group ? state.permScreens.filter(s => (s.screen_group||'main') === activeTab.group) : [];
   const generalRow = state.permMatrixData['__general__'] || {};
@@ -11948,6 +12202,10 @@ function renderPermMatrixModal() {
       ${!target ? `<div style="padding:30px;text-align:center;color:#555;background:${C.bgPanel};">${state.permMatrixMode==='role' ? 'أنشئ مجموعة أول' : 'ما فيه مستخدمين بعد'}</div>` : `
       <div style="display:flex;background:${C.bgPanel};border-bottom:1px solid ${C.border};padding:0 6px;flex-wrap:wrap;">
         ${tabs.map(t => `<button data-perm-tab="${t.key}" style="padding:6px 14px;font-size:12px;font-weight:bold;cursor:pointer;border:1px solid ${activeTab.key===t.key?C.border:'transparent'};border-bottom:none;margin-inline-start:2px;background:${activeTab.key===t.key?C.bgPanel:'#dedad0'};color:${activeTab.key===t.key?C.tabActive:'#333'};border-radius:3px 3px 0 0;position:relative;${activeTab.key===t.key?'top:1px;':''}">${t.label}</button>`).join('')}
+      </div>
+      <div style="background:#FFF8E1;border-bottom:1px solid #E8D9A8;padding:6px 12px;font-size:11.5px;color:#5A4A12;line-height:1.7;">
+        <b>كيف تشتغل:</b> ${state.permMatrixMode === 'role' ? 'صلاحيات المجموعة بتنطبق على كل موظف مربوط بيها من <b>النظام ← المستخدمين ← مجموعة الصلاحيات</b>.' : 'صلاحيات المستخدم دي بتتغلّب على صلاحيات مجموعته.'}
+        <b>قراءة</b> = تظهر له الشاشة · <b>إضافة</b> = مستند جديد · <b>تعديل</b> = تعديل مستند محفوظ · <b>إلغاء</b> = حذف صنف/عميل · <b>طباعة</b> · <b>اعتماد</b> = ترحيل المستند. التغيير بيطبّق لما الموظف يدخل من جديد.
       </div>
 
       ${activeTab.key === 'discounts' ? `
@@ -12466,7 +12724,7 @@ function renderDesignerPanelModal() {
           <div style="border:1px solid #A9A48C;border-radius:6px;padding:14px;">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:10px;">سيريال الترخيص</div>
             ${state.licenseInfo ? `<div style="background:#E8F4EF;border:1px solid #0F6E56;border-radius:6px;padding:8px 12px;font-size:12px;line-height:1.8;margin-bottom:10px;">
-              العميل: <b>${escapeHtml(state.licenseInfo.c||'')}</b> · ينتهي: <b class="mono">${escapeHtml(state.licenseInfo.e||'')}</b> · المستخدمين: <b>${state.licenseInfo.u ? escapeHtml(String(state.licenseInfo.u)) : 'غير محدود'}</b>${state.licenseInfo.n ? ` · رقم السيريال: <span class="mono">${escapeHtml(state.licenseInfo.n)}</span>` : ''}
+              العميل: <b>${escapeHtml(state.licenseInfo.c||'')}</b> · ينتهي: <b class="mono">${escapeHtml(state.licenseInfo.e||'')}</b> · المستخدمين: <b>${state.licenseInfo.u ? escapeHtml(String(state.licenseInfo.u)) : 'غير محدود'}</b> · الفروع: <b>${branchLimit() ? escapeHtml(String(branchLimit())) : 'غير محدود'}</b>${state.licenseInfo.n ? ` · رقم السيريال: <span class="mono">${escapeHtml(state.licenseInfo.n)}</span>` : ''}
             </div>` : ''}
             <div style="font-size:11px;color:#5F5E5A;margin-bottom:6px;" dir="ltr">ID: <span class="mono">${escapeHtml(currentProjectRef())}</span></div>
             <div style="display:grid;grid-template-columns:1fr;gap:12px;margin-bottom:12px;">
@@ -14590,6 +14848,7 @@ function bindAppEvents() {
       ev.stopPropagation();
       state.openDropdown = null;
       const target = btn.dataset.submenuTarget || btn.dataset.submenu;
+      if (!canOpenTarget(target)) { showToast('ما عندك صلاحية فتح هذه الشاشة — اطلبها من المدير', 'error'); return; }
       if (target === '__report_sales_invoices__') { openInvStmt('sales'); return; }
       if (target === '__item_sale_prices__') { if (!state.parties?.length) await loadParties(); openPriceHistory('', 'report'); return; }
       if (target === '__sys_features__' || target === '__account_mapping__') {
@@ -14848,6 +15107,7 @@ function bindAppEvents() {
       if (target === '__clients_board__') { await openClientsBoard(); return; }
       if (target === '__users__') {
         await loadUsers();
+        try { await loadPermMatrixLists(); } catch (e) {}
         state.showUsers = true;
         render();
         return;
@@ -15129,12 +15389,15 @@ function bindAppEvents() {
   document.querySelectorAll('[data-section]').forEach(btn => {
     btn.onclick = async () => {
       state.openDropdown = null;
+      if (!canOpenTarget(btn.dataset.section)) { showToast('ما عندك صلاحية فتح هذه الشاشة — اطلبها من المدير', 'error'); render(); return; }
       if (btn.dataset.section === 'خروج') {
         await logActivity('تسجيل خروج');
         await sb.auth.signOut();
         state.session = null;
         state.profile = null;
         state.branchPickOpen = false;
+        document.querySelectorAll('.cs-tool').forEach(el => el.remove());
+        TOOLS.notes = { list: [], current: null, loaded: false, saving: false, timer: null, useLocal: false };
         render();
         return;
       }
@@ -17172,6 +17435,10 @@ function bindAppEvents() {
       if (!name) { alert('اكتب اسم الفرع'); return; }
       const payload = { name, code: document.getElementById('br-code').value.trim() || null, phone: document.getElementById('br-phone').value.trim() || null,
         address: document.getElementById('br-address').value.trim() || null, active: state.branchForm?.is_main ? true : document.getElementById('br-active').checked };
+      const wasActive = state.editingBranchId ? (state.branches.find(b => b.id === state.editingBranchId)?.active !== false) : false;
+      if (payload.active && !wasActive && branchLimitReached(state.editingBranchId)) {
+        alert(`اشتراكك يسمح بـ ${branchLimit()} فرع فقط.\n\nلزيادة عدد الفروع تواصل مع المصمم (النظام ← الاشتراك والتجديد).`); return;
+      }
       const pfx = document.getElementById('br-prefix')?.value.trim();
       if (pfx !== undefined && pfx !== '') { if (!/^[1-9][0-9]?$/.test(pfx)) { alert('رقم الفرع لازم يكون رقم من 1 إلى 99'); return; } payload.doc_prefix = pfx; }
       if (state.editingBranchId) {
@@ -18228,11 +18495,14 @@ function bindAppEvents() {
       document.getElementById('perm-matrix-save').onclick = async () => {
         const table = state.permMatrixMode === 'role' ? 'role_permissions' : 'user_permissions';
         const idField = state.permMatrixMode === 'role' ? 'role_id' : 'user_id';
-        const rows = state.permScreens.map(s => {
+        const rows = state.permScreens.filter(s => (s.screen_group || 'main') !== 'hidden').map(s => {
           const d = state.permMatrixData[s.id] || {};
           return { [idField]: state.permMatrixTargetId, screen_id: s.id, can_read: !!d.can_read, can_add: !!d.can_add, can_edit: !!d.can_edit, can_delete: !!d.can_delete, can_print: !!d.can_print, can_approve: !!d.can_approve };
         });
-        const { error } = await sb.from(table).upsert(rows);
+        // نمسح القديم ونحفظ الجديد (عشان ما يتكرر صف الشاشة)
+        { const { error: delErr } = await sb.from(table).delete().eq(idField, state.permMatrixTargetId).in('screen_id', rows.map(r => r.screen_id));
+          if (delErr) { showToast('فشل الحفظ: ' + delErr.message, 'error'); return; } }
+        const { error } = await sb.from(table).insert(rows);
         if (error) { showToast('فشل الحفظ: ' + error.message, 'error'); return; }
         // حد الخصم الأقصى يُحفظ بمكان منفصل (مجموعات: permission_roles، مستخدم: profiles)
         const discountValue = state.permMatrixData['__general__']?.max_discount_percent ?? null;
@@ -21107,6 +21377,15 @@ function bindAppEvents() {
         } catch (ex) {
           showToast('فشل حذف المستخدم: ' + (ex?.message || String(ex)), 'error');
         }
+      };
+    });
+    document.querySelectorAll('[data-group-for]').forEach(sel => {
+      sel.onchange = async () => {
+        const u = state.users.find(x => x.id === sel.dataset.groupFor);
+        const { error } = await sb.from('profiles').update({ role_id: sel.value || null }).eq('id', sel.dataset.groupFor);
+        if (error) { showToast(/role_id/.test(error.message) ? 'شغّل ملف 25 في قاعدة البيانات أولاً' : 'فشل الحفظ: ' + error.message, 'error'); return; }
+        logActivity('ربط مستخدم بمجموعة صلاحيات', `${u?.username || ''} → ${(state.permRoles || []).find(r => r.id === sel.value)?.role_name || 'بدون'}`);
+        showToast('تم ✓ — يطبّق عند دخول المستخدم التالي'); await loadUsers(); render();
       };
     });
     document.querySelectorAll('[data-allow-branch]').forEach(chk => {
