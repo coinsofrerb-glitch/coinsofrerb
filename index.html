@@ -598,6 +598,7 @@ function render() {
     document.querySelectorAll('body > #active-item-bar').forEach(el => el.remove()); // نسخة قديمة أُضيفت مباشرة للصفحة — render يرسم البار من جديد
     root.innerHTML = withBranchQty(renderApp);
     bindAppEvents();
+    try { tickHomeClock(); } catch (e) {}
     attachWindowDragging();
     applyWindowEntranceAnimation();
     applyFeatureVisibility();
@@ -1260,6 +1261,7 @@ const emptyPartyForm = () => ({
 async function loadPurchases() {
   const { data, error } = await fetchAllQ(() => sb.from('purchase_invoices').select('*, parties(name)').order('created_at', { ascending: false }).order('id'));
   if (!error) { state.purchasesAll = data || []; state.purchases = scopeBranch(state.purchasesAll); }
+  if (pharmacyOn() && !isOffline()) loadBatches().catch(() => {});
 }
 
 function filteredPurchases() {
@@ -1292,6 +1294,7 @@ async function openPurchaseById(id) {
       item_id: l.item_id, item_name: l.items?.name || '', sku: l.items?.sku || '', unit: l.items?.unit || '',
       quantity: Number(l.quantity), unit_cost: Number(l.unit_cost), tax_percent: Number(taxPctOf(l)),
       sale_price: l.sale_price != null ? Number(l.sale_price) : null,
+      batch_no: l.batch_no || '', expiry_date: l.expiry_date || '',
     })),
   };
   state.editingPurchaseId = id;
@@ -1653,6 +1656,7 @@ async function openQuoteById(id) {
 async function loadSalesInvoices() {
   const { data, error } = await fetchAllQ(() => sb.from('sales_invoices').select('*, parties(name)').order('created_at', { ascending: false }).order('id'));
   if (!error) { state.salesInvoicesAll = data || []; state.salesInvoices = scopeBranch(state.salesInvoicesAll); }
+  if (pharmacyOn() && !isOffline()) loadBatches().catch(() => {});
 }
 function filteredSalesInvoices() {
   const q = state.salesQuery.trim().toLowerCase();
@@ -2488,6 +2492,7 @@ async function loadProfile() {
   state.profile = data || null;
   await loadMyPermissions();
   await loadFxRates();
+  await loadBatches().catch(() => {});
 }
 
 // ينشئ مستخدم جديد بدون ما يأثر على جلسة المدير الحالية (يستخدم عميل مؤقت منفصل)
@@ -2763,6 +2768,7 @@ const SUBMENUS = {
     { label: 'أرقام بديلة', target: '__alt_numbers__' },
     { label: 'تعديل رقم صنف', target: '__edit_sku__' },
     { label: 'كشف بالأصناف', target: '__items_statement__' },
+    { label: '💊 صلاحية الأدوية', target: '__expiry__' },
   ],
   'المستودعات': [
     { label: 'المستودعات', target: '__warehouses__' },
@@ -2895,6 +2901,7 @@ function renderApp() {
   ${state.showClientsBoard ? renderClientsBoard() : ''}
   ${state.showRenew ? renderRenewModal() : ''}
   ${state.showFx ? renderFxModal() : ''}
+  ${state.showExpiry ? renderExpiryModal() : ''}
   ${state.showOffQueue ? renderOfflineQueueModal() : ''}
   ${state.showReportDesigner ? renderReportDesignerModal() : ''}
   ${state.showFixedAssets ? renderFixedAssetsModal() : ''}
@@ -3409,7 +3416,7 @@ function renderQuoteFormModal() {
                   <td class="sx-rm">${idx+1}</td>
                   <td class="mono" style="text-align:center;">${escapeHtml(l.sku||'')}</td>
                   <td>${escapeHtml(l.item_name)}</td>
-                  <td style="text-align:center;">${escapeHtml(l.unit||'')}</td>
+                  <td style="text-align:center;">${escapeHtml(l.unit||'')}${packNote(l)}</td>
                   <td class="sx-num">${locked ? l.quantity : `<input data-quote-line-qty="${idx}" class="mono" value="${escapeHtml(String(l.quantity))}" />`}</td>
                   <td class="sx-num" style="color:#888;">${fmt(it.cost||0)}</td>
                   <td class="sx-num">${locked ? fmt(l.unit_price) : `<input data-quote-line-price="${idx}" class="mono" value="${escapeHtml(String(Math.round(l.unit_price*100)/100))}" />`}</td>
@@ -3697,7 +3704,7 @@ function renderPurchaseFormModal() {
         const totalQty = f.lines.reduce((s,l)=>s+Number(l.quantity||0),0);
         const showSale = !!feat('purchase_edit_price') || f.lines.some(l => l.sale_price != null && l.sale_price !== '');
         const discPct = f.discount_percent !== undefined && f.discount_percent !== '' ? f.discount_percent : (tot.subtotal ? (tot.discount/tot.subtotal*100).toFixed(2) : '0');
-        const cols = 11 + (showSale ? 1 : 0);
+        const cols = 11 + (showSale ? 1 : 0) + (pharmacyOn() ? 2 : 0);
         return `
       <div class="no-print sx-win" style="padding:10px 12px 12px;">
         <div style="display:grid;grid-template-columns:100px 150px 105px 1fr 95px 170px;gap:5px 4px;align-items:center;">
@@ -3751,7 +3758,7 @@ function renderPurchaseFormModal() {
             <table id="pi-lines-table" class="sx-grid">
               <thead><tr>
                 <th style="width:28px;">ر.م</th><th style="width:130px;">رقم الصنف</th><th>اسم الصنف</th><th style="width:60px;">الوحدة</th>
-                <th style="width:62px;">الكمية</th><th style="width:80px;">التكلفة</th>${showSale?'<th style="width:80px;">سعر البيع</th>':''}<th style="width:85px;">المجموع</th>
+                <th style="width:62px;">الكمية</th>${pharmacyOn() ? '<th style="width:80px;">التشغيلة</th><th style="width:118px;">الصلاحية</th>' : ''}<th style="width:80px;">التكلفة</th>${showSale?'<th style="width:80px;">سعر البيع</th>':''}<th style="width:85px;">المجموع</th>
                 <th style="width:55px;">%الضريبة</th><th style="width:70px;">الضريبة</th><th style="width:90px;">المجموع/ض</th><th style="width:24px;"></th>
               </tr></thead>
               <tbody>
@@ -3759,8 +3766,10 @@ function renderPurchaseFormModal() {
                   <td class="sx-rm">${idx+1}</td>
                   <td class="mono" style="text-align:center;">${escapeHtml(l.sku||'')}</td>
                   <td>${escapeHtml(l.item_name)}</td>
-                  <td style="text-align:center;">${escapeHtml(l.unit||'')}</td>
+                  <td style="text-align:center;">${escapeHtml(l.unit||'')}${packNote(l)}</td>
                   <td class="sx-num">${f.approved ? l.quantity : `<input data-purchase-line-qty="${idx}" class="mono" value="${escapeHtml(String(l.quantity))}" />`}</td>
+                  ${pharmacyOn() ? (f.approved ? `<td class="mono" style="text-align:center;">${escapeHtml(l.batch_no || '')}</td><td class="mono" style="text-align:center;${l.expiry_date ? '' : 'background:#FFF4E0;'}">${escapeHtml(l.expiry_date || '—')}</td>`
+                    : `<td><input data-purchase-line-batch="${idx}" class="mono" value="${escapeHtml(l.batch_no || '')}" /></td><td style="${l.expiry_date ? '' : 'background:#FFF4E0;'}"><input data-purchase-line-exp="${idx}" type="date" class="mono" style="width:100%;" value="${escapeHtml(l.expiry_date || '')}" /></td>`) : ''}
                   <td class="sx-num">${f.approved ? fmt(l.unit_cost) : `<input data-purchase-line-cost="${idx}" class="mono" value="${escapeHtml(String(l.unit_cost))}" />`}</td>
                   ${showSale ? `<td class="sx-num" style="color:#0F6E56;">${l.sale_price != null && l.sale_price !== '' ? fmt(l.sale_price) : ''}</td>` : ''}
                   <td class="sx-num">${fmt(sub)}</td>
@@ -3778,6 +3787,7 @@ function renderPurchaseFormModal() {
                     <button id="pi-new-item-btn" type="button" title="صنف جديد" style="border:1px solid #ACA899;background:#fff;height:20px;cursor:pointer;padding:0 4px;"><i class="ti ti-plus" style="font-size:13px;"></i></button></div></td>
                   <td id="pi-entry-unit" style="text-align:center;"></td>
                   <td><input id="pi-item-qty" class="mono" /></td>
+                  ${pharmacyOn() ? '<td><input id="pi-item-batch" class="mono" placeholder="التشغيلة" /></td><td><input id="pi-item-exp" type="date" class="mono" style="width:100%;" title="تاريخ الصلاحية" /></td>' : ''}
                   <td><input id="pi-item-cost" class="mono" title="${f.price_mode==='شامل الضريبة'?'التكلفة شاملة الضريبة':'التكلفة قبل الضريبة'}" /></td>
                   ${showSale ? `<td>${feat('purchase_edit_price') ? '<input id="pi-item-sale" class="mono" title="سعر البيع الجديد — فاضي = الافتراضي" />' : ''}</td>` : ''}
                   <td></td>
@@ -4591,7 +4601,7 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
-const APP_VERSION = '2026.10.11-5';
+const APP_VERSION = '2026.10.11-7';
 function renderHomeSection() {
   const c = state.company || {};
   const phones = [
@@ -4650,7 +4660,11 @@ function renderHomeSection() {
               <div style="font-size:22px;font-weight:700;">${escapeHtml(state.profile?.display_name || state.profile?.username || t('welcome'))}</div>
               <div style="font-size:12px;color:#B8C8DC;margin-top:4px;">${new Date().toLocaleDateString(state.lang==='en'?'en-US':'ar-SA', { weekday:'long', year:'numeric', month:'long', day:'numeric' })}</div>
             </div>
-            <div style="margin-top:36px;">
+            <div style="display:flex;gap:12px;margin-top:18px;flex-wrap:wrap;">
+              ${homeClockCard()}
+              ${homeCalendarCard()}
+            </div>
+            <div style="margin-top:22px;">
               <div style="color:#B8C8DC;font-size:12px;font-weight:500;margin-bottom:12px;">${t('quick_shortcuts')}</div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
                 ${(isAdmin() || canViewReports()) ? homeShortcut('ti-device-mobile-analytics', 'لوحة صاحب المحل', '__owner_dash__') : ''}
@@ -5068,8 +5082,8 @@ function bindGridEntry(o) {
   const fillEntry = (item) => {
     if (!item) return;
     sku.value = item.sku || '';
-    const n = $(o.name); if (n) n.textContent = item.name + '   (الرصيد: ' + (item.qty ?? 0) + ')';
-    const u = $(o.unit); if (u) u.textContent = item.unit || '';
+    const n = $(o.name); if (n) n.textContent = item.name + '   (الرصيد: ' + (item.qty ?? 0) + ')' + itemExpiryHint(item);
+    const u = $(o.unit); if (u) setEntryUnit(u, item);
   };
   sel.addEventListener('change', () => fillEntry(state.items.find(it => it.id === sel.value)));
   const openPicker = () => { const b = sku.closest('tr')?.querySelector('[data-open-item-picker]'); if (b) b.click(); };
@@ -5136,6 +5150,11 @@ function bindPurchaseSanmarUI() {
   if ($('pi-notes')) $('pi-notes').oninput = (ev) => { f.notes = ev.target.value; };
   bindGridEntry({ sku:'pi-quick-sku', sel:'pi-item-select', qty:'pi-item-qty', price:'pi-item-cost', add:'pi-add-line', name:'pi-entry-name', unit:'pi-entry-unit', extra:['pi-item-sale','pi-item-tax'], lines: () => state.purchaseForm.lines.map(l => [l.item_id, l.quantity]),
     autofocus: (state.purchaseActiveTab || 'معلومات الفاتورة') === 'معلومات الفاتورة' && !f.approved });
+  // الصيدلية: الكمية ← التشغيلة ← الصلاحية ← التكلفة
+  if (pharmacyOn() && $('pi-item-batch')) {
+    const go = (from, to) => { const a = $(from); if (!a) return; const prev = a.onkeydown; a.onkeydown = (ev) => { if (ev.key === 'Enter' && $('pi-item-select')?.value) { ev.preventDefault(); $(to)?.focus(); $(to)?.select?.(); return; } prev && prev(ev); }; };
+    go('pi-item-qty', 'pi-item-batch'); go('pi-item-batch', 'pi-item-exp'); go('pi-item-exp', 'pi-item-cost');
+  }
 }
 // ترحيل المردود كعملية واحدة بقاعدة البيانات (نفس دالة post_document لفاتورة البيع)
 // يرجّع true لو تم، false لو فشل (ما تغيّر شيء)، null لو الدالة غير مثبّتة (نكمل بالطريقة القديمة)
@@ -5511,8 +5530,8 @@ function bindSalesSanmarUI() {
   const fillEntry = (item) => {
     if (!item) return;
     sku.value = item.sku || '';
-    const n = $('si-entry-name'); if (n) n.textContent = item.name + '   (الرصيد: ' + (item.qty ?? 0) + ')';
-    const u = $('si-entry-unit'); if (u) u.textContent = item.unit || '';
+    const n = $('si-entry-name'); if (n) n.textContent = item.name + '   (الرصيد: ' + (item.qty ?? 0) + ')' + itemExpiryHint(item);
+    const u = $('si-entry-unit'); if (u) setEntryUnit(u, item);
   };
   sel.addEventListener('change', () => fillEntry(state.items.find(it => it.id === sel.value)));
   const openPicker = () => { const b = sku.closest('tr')?.querySelector('[data-open-item-picker]'); if (b) b.click(); };
@@ -5766,7 +5785,7 @@ function renderSalesFormModal() {
                     <td class="sx-rm">${idx+1}</td>
                     <td class="mono" style="text-align:center;">${escapeHtml(l.sku||'')}</td>
                     <td>${escapeHtml(l.item_name)}</td>
-                    <td style="text-align:center;">${escapeHtml(l.unit||'')}</td>
+                    <td style="text-align:center;">${escapeHtml(l.unit||'')}${packNote(l)}</td>
                     <td class="sx-num">${f.approved ? l.quantity : `<input data-sales-line-qty="${idx}" class="mono" value="${escapeHtml(String(l.quantity))}" />`}</td>
                     <td class="sx-num">${f.approved ? fmt(l.unit_price) : `<input data-sales-line-price="${idx}" class="mono" value="${escapeHtml(String(Math.round(l.unit_price*100)/100))}" />`}</td>
                     ${showLineDisc ? `<td class="sx-num">${f.approved ? (Number(l.disc_pct)||0)+'%' : `<input data-sales-line-disc="${idx}" class="mono" value="${Number(l.disc_pct)||0}" />`}</td>` : ''}
@@ -6236,7 +6255,7 @@ function renderSalesReturnFormModal() {
                   <td class="sx-rm">${idx+1}</td>
                   <td class="mono" style="text-align:center;">${escapeHtml(l.sku||'')}</td>
                   <td>${escapeHtml(l.item_name)}</td>
-                  <td style="text-align:center;">${escapeHtml(l.unit||'')}</td>
+                  <td style="text-align:center;">${escapeHtml(l.unit||'')}${packNote(l)}</td>
                   <td class="sx-num">${l.quantity}</td>
                   <td class="sx-num">${fmt(l.unit_price)}</td>
                   <td class="sx-num">${fmt(sub)}</td>
@@ -6432,7 +6451,7 @@ function renderPurchaseReturnFormModal() {
                   <td class="sx-rm">${idx+1}</td>
                   <td class="mono" style="text-align:center;">${escapeHtml(l.sku||'')}</td>
                   <td>${escapeHtml(l.item_name)}</td>
-                  <td style="text-align:center;">${escapeHtml(l.unit||'')}</td>
+                  <td style="text-align:center;">${escapeHtml(l.unit||'')}${packNote(l)}</td>
                   <td class="sx-num">${l.quantity}</td>
                   <td class="sx-num">${fmt(l.unit_cost)}</td>
                   <td class="sx-num">${fmt(sub)}</td>
@@ -7186,8 +7205,9 @@ function findAlternativeItems(it) {
   if (!it) return [];
   const map = state.itemAltNumbersMap || {};
   const keys = new Set([normAltCode(it.sku), ...(map[it.id] || []).map(normAltCode)].filter(Boolean));
-  if (!keys.size) return [];
-  return state.items.filter(x => x.id !== it.id && (keys.has(normAltCode(x.sku)) || (map[x.id] || []).some(a => keys.has(normAltCode(a)))))
+  const gen = pharmacyOn() ? String(it.generic_name || '').trim().toLowerCase() : '';
+  if (!keys.size && !gen) return [];
+  return state.items.filter(x => x.id !== it.id && ((gen && String(x.generic_name || '').trim().toLowerCase() === gen) || keys.has(normAltCode(x.sku)) || (map[x.id] || []).some(a => keys.has(normAltCode(a)))))
     .sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0));
 }
 function renderActiveItemBar() {
@@ -7220,6 +7240,8 @@ function renderActiveItemBar() {
     <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-map-pin"></i><span style="font-size:11px;opacity:0.85;">الموقع:</span><span class="mono" style="font-weight:700;">${escapeHtml([it.location1,it.location2,it.location3,it.location4].filter(Boolean).join(' / ') || '—')}</span></div>
     <div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-boxes"></i><span style="font-size:11px;opacity:0.85;">${isBranchUser() ? 'رصيد فرعك:' : 'الكمية بالمخزون:'}</span><span class="mono" style="font-weight:700;color:${outOfStock?'#FFD8D8':'#fff'};">${itemQtyForUser(it)}</span></div>
     ${itemQtyOtherBranches(it).length ? `<div style="display:flex;align-items:center;gap:6px;"><i class="ti ti-building-store"></i><span style="font-size:11px;opacity:0.85;">فروع أخرى:</span>${itemQtyOtherBranches(it).map(o => `<span style="background:rgba(255,255,255,0.18);border-radius:10px;padding:1px 8px;font-size:11.5px;">${escapeHtml(o.name)} <b class="mono">${o.qty}</b></span>`).join('')}</div>` : ''}
+    ${pharmacyOn() && it.generic_name ? `<div style="display:flex;align-items:center;gap:6px;"><span style="font-size:11px;opacity:0.85;">💊 العلمي:</span><span style="font-weight:700;" dir="ltr">${escapeHtml(it.generic_name)}</span></div>` : ''}
+    ${pharmacyOn() && itemBatches(it.id).length ? `<div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;"><i class="ti ti-calendar-time"></i><span style="font-size:11px;opacity:0.85;">الصلاحية:</span>${itemBatches(it.id).slice(0, 4).map(b => { const st = expiryStatus(b.expiry_date); return `<span class="mono" title="تشغيلة ${escapeHtml(b.batch_no || '—')}" style="background:${st.k === 'ok' ? 'rgba(255,255,255,0.18)' : st.bg};color:${st.k === 'ok' ? '#fff' : st.c};border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;">${fmtExp(b.expiry_date)} (${Number(b.qty)})</span>`; }).join('')}</div>` : ''}
     <button type="button" data-bar-history="${it.id}" style="${chip}font-size:12px;padding:4px 12px;" title="سجل أسعار البيع بالتواريخ (F6)"><i class="ti ti-history"></i> سجل الأسعار</button>
     <button id="active-item-bar-close" class="no-print" style="margin-right:auto;background:rgba(255,255,255,0.2);border:none;color:#fff;width:22px;height:22px;border-radius:50%;cursor:pointer;">✕</button>
     ${secondRow}
@@ -11036,6 +11058,7 @@ function renderTabContent() {
       <div style="grid-column:1/-1;font-size:11px;font-weight:600;color:#5F5E5A;">الاسم والوصف</div>
       <div style="grid-column:1/-1;">${field('اسم الصنف (عربي) *', `<input id="f-name" class="input ${e.name?'err':''}" value="${escapeHtml(f.name)}" />`)}</div>
       <div style="grid-column:1/-1;">${field('اسم الصنف (إنجليزي)', `<input id="f-name_en" class="input" value="${escapeHtml(f.name_en)}" dir="ltr" />`)}</div>
+      ${pharmacyOn() ? `<div style="grid-column:1/-1;">${field('💊 الاسم العلمي (المادة الفعالة)', `<input id="f-generic_name" class="input" value="${escapeHtml(f.generic_name || '')}" placeholder="مثال: Paracetamol 500mg" dir="ltr" />`)}</div>` : ''}
       <div style="grid-column:1/-1;">${field('اسم الصنف تفصيلياً', `<textarea id="f-detailed_name" class="input" rows="2">${escapeHtml(f.detailed_name)}</textarea>`)}</div>
 
       ${sectionHeader('التصنيف', 'ti-category')}
@@ -11067,6 +11090,12 @@ function renderTabContent() {
       ${field('سعر البيع 1 *', `<input id="f-price" class="input ${e.price?'err':''}" value="${escapeHtml(f.price)}" />`)}
       ${field('سعر البيع 2', `<input id="f-price2" class="input" value="${escapeHtml(f.price2)}" />`)}
       ${field('سعر البيع 3', `<input id="f-price3" class="input" value="${escapeHtml(f.price3)}" />`)}
+      ${pharmacyOn() ? `<div style="grid-column:1/-1;border:1px solid #CFE0F0;background:#F3F8FD;border-radius:10px;padding:10px 12px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;align-items:end;">
+        <div style="grid-column:1/-1;font-size:12px;font-weight:700;color:#1B3352;">💊 البيع بالعلبة — الوحدة الأساسية هي «${escapeHtml(f.unit || 'الوحدة')}» (المخزون والأسعار فوق بيها)</div>
+        ${field('اسم العلبة', `<input id="f-pack_unit" class="input" value="${escapeHtml(f.pack_unit || '')}" placeholder="علبة" />`)}
+        ${field(`كم ${escapeHtml(f.unit || 'وحدة')} في العلبة`, `<input id="f-pack_factor" class="input mono" value="${escapeHtml(f.pack_factor ?? '')}" placeholder="مثال: 3" />`)}
+        ${field('سعر العلبة (اختياري)', `<input id="f-pack_price" class="input mono" value="${escapeHtml(f.pack_price ?? '')}" placeholder="فاضي = السعر × العدد" />`)}
+      </div>` : ''}
       ${fxOn() ? `<div style="grid-column:1/-1;border:1px solid #CFE6DD;background:#F4F9F7;border-radius:10px;padding:10px 12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end;">
         <div style="grid-column:1/-1;font-size:12px;font-weight:700;color:#0F6E56;">💵 السعر بـ${escapeHtml(fxName())} (سعر الصرف الحالي ${fxRate() ? fxRate().toLocaleString('en-US') : '—'})</div>
         ${field('سعر البيع بالدولار', `<div style="display:flex;gap:6px;"><input id="f-price_usd" class="input mono" value="${escapeHtml(f.price_usd ?? '')}" placeholder="مثال: 12.5" /><button type="button" data-fx-calc-price class="btn" style="white-space:nowrap;padding:4px 10px;font-size:11.5px;">احسب بالجنيه ←</button></div>`)}
@@ -12153,7 +12182,7 @@ async function saveOfflineSnapshot() {
     items: state.items || [], parties: state.partiesAll || state.parties || [], warehouses: state.warehouses || [],
     branches: state.branches || [], paymentMethods: state.paymentMethods || [], whStock: state.whStock || null,
     fxRates: state.fxRates || [], myPermissions: state.myPermissions || {}, altNumbers: state.itemAltNumbersMap || {},
-    branchPrices: state.branchPrices || null,
+    branchPrices: state.branchPrices || null, batches: state.batches || [],
   };
   await offSet('snap', snap);
 }
@@ -12175,7 +12204,7 @@ async function startOfflineBoot() {
     licenseSettings: { serial: snap.licenseSerial }, items: snap.items || [], partiesAll: snap.parties || [], warehouses: snap.warehouses || [],
     branches: snap.branches || [], branchesReady: !!(snap.branches || []).length, branchesTried: true, paymentMethods: snap.paymentMethods || [],
     whStock: snap.whStock, fxRates: snap.fxRates || [], fxReady: !!(snap.fxRates || []).length, myPermissions: snap.myPermissions || {},
-    itemAltNumbersMap: snap.altNumbers || {}, branchPrices: snap.branchPrices, salesInvoicesAll: [], salesInvoices: [], purchases: [], purchasesAll: [],
+    itemAltNumbersMap: snap.altNumbers || {}, branchPrices: snap.branchPrices, batches: snap.batches || [], batchesReady: true, salesInvoicesAll: [], salesInvoices: [], purchases: [], purchasesAll: [],
     offlineSnapAt: snap.at,
   });
   refreshBranchScope();
@@ -12359,6 +12388,238 @@ function homeSpeedCard() {
     </div>`;
 }
 document.addEventListener('click', e => { if (e.target.closest('[data-speed-run]')) runSpeedTest(); });
+
+// =====================================================================
+// الساعة والتقويم (الشاشة الرئيسية) — الساعة تتحدّث كل ثانية بدون إعادة رسم الصفحة
+// =====================================================================
+function homeClockCard() {
+  const ticks = Array.from({ length: 60 }, (_, i) => { const a = i * 6 * Math.PI / 180, big = i % 5 === 0, r1 = big ? 40 : 43, r2 = 46;
+    return `<line x1="${50 + r1 * Math.sin(a)}" y1="${50 - r1 * Math.cos(a)}" x2="${50 + r2 * Math.sin(a)}" y2="${50 - r2 * Math.cos(a)}" stroke="${big ? '#fff' : 'rgba(255,255,255,.35)'}" stroke-width="${big ? 2.2 : 1}" stroke-linecap="round"/>`; }).join('');
+  const nums = [12, 3, 6, 9].map((n, i) => { const a = i * 90 * Math.PI / 180; return `<text x="${50 + 32 * Math.sin(a)}" y="${50 - 32 * Math.cos(a) + 4}" text-anchor="middle" font-size="10" font-weight="700" fill="rgba(255,255,255,.85)" font-family="Tahoma">${n}</text>`; }).join('');
+  return `
+    <div style="flex:1;min-width:0;background:linear-gradient(145deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border:1px solid rgba(255,255,255,.18);border-radius:16px;padding:12px;display:flex;align-items:center;gap:12px;box-shadow:0 8px 24px rgba(0,0,0,.18);">
+      <svg viewBox="0 0 100 100" style="width:104px;height:104px;flex-shrink:0;filter:drop-shadow(0 4px 10px rgba(0,0,0,.25));">
+        <defs><radialGradient id="clk-face" cx="50%" cy="40%" r="65%"><stop offset="0%" stop-color="#2E5C8A"/><stop offset="100%" stop-color="#132A44"/></radialGradient></defs>
+        <circle cx="50" cy="50" r="48" fill="url(#clk-face)" stroke="rgba(255,255,255,.35)" stroke-width="1.5"/>
+        ${ticks}${nums}
+        <line id="clk-h" x1="50" y1="54" x2="50" y2="27" stroke="#fff" stroke-width="4" stroke-linecap="round"/>
+        <line id="clk-m" x1="50" y1="56" x2="50" y2="15" stroke="#E8F0FA" stroke-width="2.6" stroke-linecap="round"/>
+        <line id="clk-s" x1="50" y1="60" x2="50" y2="11" stroke="#FFB020" stroke-width="1.2" stroke-linecap="round"/>
+        <circle cx="50" cy="50" r="3.4" fill="#FFB020" stroke="#fff" stroke-width="1"/>
+      </svg>
+      <div style="flex:1;min-width:0;color:#fff;text-align:center;">
+        <div style="display:flex;align-items:baseline;justify-content:center;gap:4px;" dir="ltr">
+          <span id="clk-digital" style="font-size:30px;font-weight:800;letter-spacing:1px;font-family:'Segoe UI',Tahoma,monospace;">--:--</span>
+          <span id="clk-sec" style="font-size:15px;font-weight:700;color:#FFB020;font-family:monospace;">--</span>
+        </div>
+        <div id="clk-ampm" style="font-size:12.5px;color:#B8C8DC;margin-top:2px;"></div>
+        <div id="clk-day" style="font-size:13px;font-weight:700;margin-top:4px;"></div>
+      </div>
+    </div>`;
+}
+function tickHomeClock() {
+  const h = document.getElementById('clk-h'); if (!h) return;
+  const d = new Date(), hr = d.getHours(), mi = d.getMinutes(), se = d.getSeconds();
+  const rot = (el, deg) => { const e = document.getElementById(el); if (e) e.setAttribute('transform', `rotate(${deg} 50 50)`); };
+  rot('clk-h', (hr % 12) * 30 + mi * 0.5); rot('clk-m', mi * 6 + se * 0.1); rot('clk-s', se * 6);
+  const h12 = hr % 12 || 12;
+  const set = (id, v) => { const e = document.getElementById(id); if (e && e.textContent !== v) e.textContent = v; };
+  set('clk-digital', `${String(h12).padStart(2, '0')}:${String(mi).padStart(2, '0')}`);
+  set('clk-sec', String(se).padStart(2, '0'));
+  set('clk-ampm', hr < 12 ? 'صباحاً' : 'مساءً');
+  set('clk-day', d.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', { weekday: 'long' }));
+}
+if (!window.__clockTimer) window.__clockTimer = setInterval(tickHomeClock, 1000);
+
+function homeCalendarCard() {
+  const off = state.calOffset || 0, now = new Date();
+  const base = new Date(now.getFullYear(), now.getMonth() + off, 1, 12);
+  const y = base.getFullYear(), m = base.getMonth();
+  const first = base.getDay(); // الأحد = 0
+  const days = new Date(y, m + 1, 0).getDate();
+  const isToday = dd => off === 0 && dd === now.getDate();
+  const monthName = base.toLocaleDateString('ar-SA-u-ca-gregory-nu-latn', { month: 'long', year: 'numeric' });
+  const hijri = (dt) => { try { return dt.toLocaleDateString('ar-SA-u-ca-islamic-umalqura-nu-latn', { day: 'numeric', month: 'long', year: 'numeric' }); } catch (e) { return ''; } };
+  const wd = ['أحد', 'إثنين', 'ثلاثاء', 'أربعاء', 'خميس', 'جمعة', 'سبت'];
+  const cells = [];
+  for (let i = 0; i < first; i++) cells.push('<div></div>');
+  for (let dd = 1; dd <= days; dd++) {
+    const dow = (first + dd - 1) % 7, weekend = dow === 5 || dow === 6;
+    cells.push(`<div title="${escapeHtml(hijri(new Date(y, m, dd, 12)))}" style="text-align:center;font-size:11.5px;padding:3px 0;border-radius:7px;font-family:monospace;${isToday(dd) ? 'background:#FFB020;color:#132A44;font-weight:800;box-shadow:0 2px 8px rgba(255,176,32,.45);' : weekend ? 'color:#FFC9A8;' : 'color:#EAF1F8;'}">${dd}</div>`);
+  }
+  return `
+    <div id="home-cal" style="flex:1;min-width:0;background:linear-gradient(145deg,rgba(255,255,255,.12),rgba(255,255,255,.04));border:1px solid rgba(255,255,255,.18);border-radius:16px;padding:10px 12px;color:#fff;box-shadow:0 8px 24px rgba(0,0,0,.18);">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <button data-cal-nav="-1" style="background:rgba(255,255,255,.12);border:none;color:#fff;border-radius:7px;width:24px;height:24px;cursor:pointer;"><i class="ti ti-chevron-right"></i></button>
+        <div style="text-align:center;cursor:pointer;" data-cal-nav="0" title="الرجوع للشهر الحالي">
+          <div style="font-size:13.5px;font-weight:800;">${escapeHtml(monthName)}</div>
+          <div style="font-size:10.5px;color:#B8C8DC;">${escapeHtml(hijri(off === 0 ? now : base))}</div>
+        </div>
+        <button data-cal-nav="1" style="background:rgba(255,255,255,.12);border:none;color:#fff;border-radius:7px;width:24px;height:24px;cursor:pointer;"><i class="ti ti-chevron-left"></i></button>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;">
+        ${wd.map((w, i) => `<div style="text-align:center;font-size:9.5px;font-weight:700;color:${i >= 5 ? '#FFC9A8' : '#B8C8DC'};padding-bottom:2px;">${w}</div>`).join('')}
+        ${cells.join('')}
+      </div>
+    </div>`;
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-cal-nav]'); if (!b) return;
+  const v = Number(b.dataset.calNav); state.calOffset = v === 0 ? 0 : (state.calOffset || 0) + v;
+  const el = document.getElementById('home-cal'); if (el) el.outerHTML = homeCalendarCard();
+});
+
+// =====================================================================
+// وضع الصيدلية: التشغيلات والصلاحية، البيع بالعلبة/الشريط، الاسم العلمي والبدائل
+// يتفعّل من مميزات النظام ← «نوع النشاط: صيدلية»
+// =====================================================================
+function pharmacyOn() { return feat('business_type') === 'pharmacy'; }
+function expiryAlertDays() { return Math.max(1, Number(feat('expiry_alert_days')) || 90); }
+function phToday() { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+function phAddDays(n) { const d = new Date(); d.setDate(d.getDate() + n); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+async function loadBatches() {
+  if (!pharmacyOn() || !state.session) { state.batches = []; state.batchesReady = false; return; }
+  const { data, error } = await fetchAllQ(() => sb.from('item_batches').select('id, item_id, warehouse_id, batch_no, expiry_date, qty').gt('qty', 0).order('expiry_date'));
+  state.batchesReady = !error; state.batches = error ? [] : (data || []);
+}
+// تشغيلات الصنف المتاحة (بمستودعات فرع العمل لو في فرع)
+function itemBatches(itemId) {
+  const whs = (typeof myWarehouses === 'function' && userBranchId()) ? new Set(myWarehouses().map(w => w.id)) : null;
+  return (state.batches || []).filter(b => b.item_id === itemId && Number(b.qty) > 0 && (!whs || !b.warehouse_id || whs.has(b.warehouse_id)));
+}
+function expiryStatus(exp) {
+  if (!exp) return null;
+  const today = phToday();
+  if (exp < today) return { k: 'expired', l: 'منتهي', c: '#C0392B', bg: '#FCEBEB' };
+  if (exp <= phAddDays(30)) return { k: 'd30', l: 'خلال شهر', c: '#C0392B', bg: '#FDECEA' };
+  if (exp <= phAddDays(expiryAlertDays())) return { k: 'near', l: 'قريب', c: '#BA7517', bg: '#FFF4E0' };
+  return { k: 'ok', l: 'صالح', c: '#0F6E56', bg: '#E1F5EE' };
+}
+function fmtExp(exp) { return exp ? String(exp).slice(0, 7).split('-').reverse().join('/') : ''; }
+// نص يظهر جنب اسم الصنف وقت الإدخال: أقرب صلاحية صالحة + كمية المنتهي
+function itemExpiryHint(item) {
+  if (!pharmacyOn() || !item) return '';
+  const bs = itemBatches(item.id); if (!bs.length) return '';
+  const today = phToday();
+  const valid = bs.filter(b => b.expiry_date >= today), expired = bs.filter(b => b.expiry_date < today);
+  let t = valid.length ? `  · أقرب صلاحية ${fmtExp(valid[0].expiry_date)}` : '';
+  const exQ = expired.reduce((s, b) => s + Number(b.qty), 0);
+  if (exQ > 0) t += `  · ⚠️ ${exQ} منتهي`;
+  return t;
+}
+function itemValidQty(item) { const today = phToday(); return itemBatches(item.id).filter(b => b.expiry_date >= today).reduce((s, b) => s + Number(b.qty), 0); }
+function itemExpiredQty(item) { const today = phToday(); return itemBatches(item.id).filter(b => b.expiry_date < today).reduce((s, b) => s + Number(b.qty), 0); }
+// ---------- البيع بالعلبة / الشريط ----------
+function packFactor(item) { const f = Number(item?.pack_factor); return pharmacyOn() && f > 1 ? f : 0; }
+const PACK_PRICE_INPUT = { 'si-entry-unit': ['si-item-qty', 'si-item-price', 'price'], 'qt-entry-unit': ['qt-item-qty', 'qt-item-price', 'price'], 'pi-entry-unit': ['pi-item-qty', 'pi-item-cost', 'cost'] };
+function setEntryUnit(u, item) {
+  if (!u) return;
+  const f = packFactor(item);
+  if (!f || !PACK_PRICE_INPUT[u.id]) { u.textContent = item?.unit || ''; return; }
+  u.innerHTML = `<select data-pack-sel="${u.id}" data-item="${item.id}" title="الوحدة" style="width:100%;font-size:11px;border:1px solid #ACA899;background:#FFFDE8;font-family:inherit;">
+    <option value="1">${escapeHtml(item.unit || 'وحدة')}</option><option value="${f}">${escapeHtml(item.pack_unit || 'علبة')} (${f})</option></select>`;
+}
+function packNote(l) {
+  const it = (state.items || []).find(x => x.id === l.item_id); const f = packFactor(it);
+  const q = Number(l.quantity); if (!f || !(q >= f)) return '';
+  const packs = Math.floor(q / f), rem = Math.round((q - packs * f) * 1000) / 1000;
+  return `<div style="font-size:9.5px;color:#0F6E56;line-height:1.1;">${packs} ${escapeHtml(it.pack_unit || 'علبة')}${rem ? ` + ${rem}` : ''}</div>`;
+}
+document.addEventListener('change', e => {
+  const sel = e.target.closest && e.target.closest('[data-pack-sel]'); if (!sel) return;
+  const cfg = PACK_PRICE_INPUT[sel.dataset.packSel]; if (!cfg) return;
+  const it = state.items.find(x => x.id === sel.dataset.item); const pe = document.getElementById(cfg[1]);
+  const f = packFactor(it), toPack = Number(sel.value) > 1, prev = Number(sel.dataset.prev || 1);
+  if (pe && f && toPack !== (prev > 1)) {
+    const v = Number(pe.value);
+    if (toPack) pe.value = (cfg[2] === 'price' && Number(it.pack_price) > 0) ? Number(it.pack_price) : (v > 0 ? Math.round(v * f * 100) / 100 : pe.value);
+    else if (v > 0) pe.value = Math.round(v / f * 10000) / 10000;
+  }
+  sel.dataset.prev = sel.value;
+  document.getElementById(cfg[0])?.focus();
+});
+// قبل إضافة السطر: لو اختار العلبة نحوّل الكمية والسعر للوحدة الأساسية (المخزون والتكلفة دايماً بالوحدة الأساسية)
+document.addEventListener('click', e => {
+  const btn = e.target.closest && e.target.closest('#si-add-line, #qt-add-line, #pi-add-line'); if (!btn) return;
+  const unitId = btn.id.slice(0, 2) + '-entry-unit';
+  const sel = document.querySelector(`[data-pack-sel="${unitId}"]`); const f = sel ? Number(sel.value) : 1;
+  if (!(f > 1)) return;
+  const [qId, pId] = PACK_PRICE_INPUT[unitId]; const qe = document.getElementById(qId), pe = document.getElementById(pId);
+  const q0 = qe?.value, p0 = pe?.value;
+  if (qe && Number(qe.value) > 0) qe.value = String(Math.round(Number(qe.value) * f * 1000) / 1000);
+  if (pe && pe.value !== '' && !isNaN(Number(pe.value))) pe.value = String(Number(pe.value) / f);
+  setTimeout(() => { if (document.body.contains(qe) && qe.value !== '') { qe.value = q0; if (pe) pe.value = p0; } }, 0);
+}, true);
+// ---------- تقرير الصلاحيات ----------
+async function openExpiryReport() {
+  await loadBatches();
+  state.expFilter = state.expFilter || 'near'; state.expQuery = ''; state.showExpiry = true; render();
+}
+function expiryRows() {
+  const f = state.expFilter || 'near', q = (state.expQuery || '').trim().toLowerCase(), today = phToday(), lim = phAddDays(expiryAlertDays());
+  const items = new Map((state.items || []).map(i => [i.id, i]));
+  return itemBatchesScoped().filter(b => {
+    if (f === 'expired' && !(b.expiry_date < today)) return false;
+    if (f === 'near' && !(b.expiry_date <= lim)) return false;
+    if (f === 'd30' && !(b.expiry_date >= today && b.expiry_date <= phAddDays(30))) return false;
+    if (!q) return true;
+    const it = items.get(b.item_id) || {};
+    return [it.name, it.sku, it.generic_name, b.batch_no].some(v => String(v || '').toLowerCase().includes(q));
+  }).map(b => { const it = items.get(b.item_id) || {}; return { ...b, name: it.name || '—', sku: it.sku || '', generic: it.generic_name || '', unit: it.unit || '', cost: Number(it.cost || 0), wh: (state.warehouses || []).find(w => w.id === b.warehouse_id)?.name || '' }; });
+}
+function itemBatchesScoped() {
+  const whs = (typeof myWarehouses === 'function' && userBranchId()) ? new Set(myWarehouses().map(w => w.id)) : null;
+  return (state.batches || []).filter(b => Number(b.qty) > 0 && (!whs || !b.warehouse_id || whs.has(b.warehouse_id)));
+}
+function renderExpiryModal() {
+  const rows = expiryRows(), today = phToday();
+  const all = itemBatchesScoped();
+  const cnt = { expired: all.filter(b => b.expiry_date < today).length, d30: all.filter(b => b.expiry_date >= today && b.expiry_date <= phAddDays(30)).length, near: all.filter(b => b.expiry_date <= phAddDays(expiryAlertDays())).length, all: all.length };
+  const val = rows.reduce((s, r) => s + r.qty * r.cost, 0);
+  const tab = (k, l, c) => `<button data-exp-f="${k}" style="padding:6px 14px;border-radius:999px;border:1px solid ${state.expFilter === k ? c : '#D8D4C4'};background:${state.expFilter === k ? c : '#fff'};color:${state.expFilter === k ? '#fff' : '#3A3826'};font-size:12px;font-weight:700;cursor:pointer;font-family:inherit;">${l} (${cnt[k]})</button>`;
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:60;">
+    <div style="background:#fff;border-radius:14px;width:100%;max-width:980px;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+      <div class="win-title"><span><i class="ti ti-calendar-exclamation"></i> صلاحية الأدوية</span><button data-exp-close style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
+      <div style="padding:12px 16px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #EEE;">
+        ${tab('expired', '⛔ منتهي', '#C0392B')}${tab('d30', 'خلال 30 يوم', '#D35400')}${tab('near', `خلال ${expiryAlertDays()} يوم`, '#BA7517')}${tab('all', 'كل التشغيلات', '#1B3352')}
+        <input id="exp-q" class="input" placeholder="بحث بالاسم، الاسم العلمي، التشغيلة..." value="${escapeHtml(state.expQuery || '')}" style="flex:1;min-width:180px;padding:6px 10px;font-size:12.5px;" />
+        <button data-exp-xlsx class="btn" style="padding:6px 12px;font-size:12px;"><i class="ti ti-file-spreadsheet"></i> Excel</button>
+      </div>
+      <div style="overflow:auto;flex:1;">
+        <table style="width:100%;border-collapse:collapse;font-size:12.5px;">
+          <thead><tr style="background:#1B3352;color:#fff;position:sticky;top:0;">${['الصنف', 'الاسم العلمي', 'التشغيلة', 'تاريخ الصلاحية', 'الحالة', 'الكمية', 'القيمة بالتكلفة', 'المستودع'].map(h => `<th style="padding:8px;text-align:right;font-weight:600;">${h}</th>`).join('')}</tr></thead>
+          <tbody>${rows.map((r, i) => { const st = expiryStatus(r.expiry_date); const days = Math.round((new Date(r.expiry_date) - new Date(today)) / 86400000); return `<tr style="background:${i % 2 ? '#F7F5EE' : '#fff'};">
+            <td style="padding:6px 8px;"><b>${escapeHtml(r.name)}</b> <span class="mono" style="color:#8B8A7A;font-size:11px;">${escapeHtml(r.sku)}</span></td>
+            <td style="padding:6px 8px;color:#5F5E5A;">${escapeHtml(r.generic)}</td>
+            <td style="padding:6px 8px;" class="mono">${escapeHtml(r.batch_no || '—')}</td>
+            <td style="padding:6px 8px;" class="mono">${escapeHtml(r.expiry_date)}</td>
+            <td style="padding:6px 8px;"><span style="background:${st.bg};color:${st.c};padding:2px 9px;border-radius:9px;font-weight:700;font-size:11px;">${st.l}${days >= 0 ? ` · ${days} يوم` : ` · من ${-days} يوم`}</span></td>
+            <td style="padding:6px 8px;" class="mono"><b>${Number(r.qty)}</b> ${escapeHtml(r.unit)}</td>
+            <td style="padding:6px 8px;" class="mono">${fmt(r.qty * r.cost)}</td>
+            <td style="padding:6px 8px;color:#5F5E5A;">${escapeHtml(r.wh)}</td></tr>`; }).join('') || `<tr><td colspan="8" style="padding:30px;text-align:center;color:#8B8A7A;">${state.batchesReady === false ? 'شغّل ملف 28_الصيدلية.sql في قاعدة البيانات أولاً' : 'ما في أصناف هنا ✓'}</td></tr>`}</tbody>
+        </table>
+      </div>
+      <div style="padding:10px 16px;border-top:1px solid #EEE;display:flex;justify-content:space-between;font-size:12.5px;color:#3A3826;">
+        <span>${rows.length} تشغيلة · القيمة بالتكلفة: <b class="mono">${fmt(val)}</b></span>
+        <span style="color:#8B8A7A;">المنتهي ما بيتباع تلقائياً — رجّعه للمورد بمردود شراء أو اعمل ليه جرد تالف.</span>
+      </div>
+    </div>
+  </div>`;
+}
+document.addEventListener('click', e => {
+  if (e.target.closest('[data-exp-close]')) { state.showExpiry = false; render(); return; }
+  const f = e.target.closest('[data-exp-f]'); if (f) { state.expFilter = f.dataset.expF; render(); return; }
+  if (e.target.closest('[data-exp-xlsx]')) {
+    const rows = expiryRows().map(r => ({ 'الصنف': r.name, 'رقم الصنف': r.sku, 'الاسم العلمي': r.generic, 'التشغيلة': r.batch_no, 'تاريخ الصلاحية': r.expiry_date, 'الحالة': expiryStatus(r.expiry_date).l, 'الكمية': Number(r.qty), 'القيمة بالتكلفة': Math.round(r.qty * r.cost * 100) / 100, 'المستودع': r.wh }));
+    const ws = XLSX.utils.json_to_sheet(rows); ws['!views'] = [{ RTL: true }]; const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'الصلاحيات'); XLSX.writeFile(wb, `صلاحية_الأدوية_${phToday()}.xlsx`);
+  }
+});
+document.addEventListener('input', e => {
+  const pb = e.target.closest && e.target.closest('[data-purchase-line-batch], [data-purchase-line-exp]');
+  if (pb && state.purchaseForm) { const l = state.purchaseForm.lines[Number(pb.dataset.purchaseLineBatch ?? pb.dataset.purchaseLineExp)]; if (l) { if (pb.dataset.purchaseLineBatch != null) l.batch_no = pb.value; else { l.expiry_date = pb.value; pb.parentElement.style.background = pb.value ? '' : '#FFF4E0'; } } return; }
+  if (e.target && e.target.id === 'exp-q') { state.expQuery = e.target.value; const pos = e.target.selectionStart; render(); const el = document.getElementById('exp-q'); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (x) {} } }
+});
 
 async function recordLicenseInCrm(info, serialNo, note, extra) {
   const ref = info.p || currentProjectRef();
@@ -13657,6 +13918,13 @@ async function loadAlerts() {
   if (outOfStock.length > 0) alerts.push({ severity:'high', text:`${outOfStock.length} صنف نفد من المخزون تماماً`, target:'الاصناف' });
   if (nearLow.length > 0) alerts.push({ severity:'medium', text:`${nearLow.length} صنف وصل لحد إعادة الطلب`, target:'الاصناف' });
 
+  if (pharmacyOn()) {
+    await loadBatches().catch(() => {});
+    const bs = itemBatchesScoped(), td = phToday();
+    const ex = bs.filter(b => b.expiry_date < td).length, nr = bs.filter(b => b.expiry_date >= td && b.expiry_date <= phAddDays(expiryAlertDays())).length;
+    if (ex) alerts.push({ severity: 'high', text: `💊 ${ex} تشغيلة دواء منتهية الصلاحية لسه في المخزون`, target: '__expiry__' });
+    if (nr) alerts.push({ severity: 'medium', text: `💊 ${nr} تشغيلة بتنتهي صلاحيتها خلال ${expiryAlertDays()} يوم`, target: '__expiry__' });
+  }
   if (fxOn() && fxStale() && canSetFx()) alerts.push({ severity: 'medium', text: `💵 ما اتسجّل سعر ${fxName()} اليوم — اضغط عشان تحدّثه`, target: '__fx__' });
   // طلبات بضاعة من فروع أخرى / تحويلات بالطريق لفرعي
   if (state.branchesReady && (state.branches || []).length > 1) {
@@ -14184,6 +14452,8 @@ const SYSTEM_FEATURES = [
   { key:'currency_sub', type:'text', def:'هللة', label:'اسم الجزء الصغير من العملة' },
   { key:'currency_abbr_ar', type:'text', def:'ر.س', label:'اختصار العملة المحلية ع' },
   { key:'currency_abbr_en', type:'text', def:'SAR', label:'اختصار العملة المحلية E' },
+  { key:'business_type', type:'select', def:'shop', label:'🏪 نوع النشاط', options:[['shop','محل تجاري (عادي)'],['pharmacy','💊 صيدلية — تشغيلات وتاريخ صلاحية، بيع بالعلبة والشريط، الاسم العلمي']] },
+  { key:'expiry_alert_days', type:'int', def:90, min:7, max:365, label:'💊 التنبيه قبل انتهاء صلاحية الدواء بـ (يوم)' },
   { key:'fx_enabled', type:'bool', def:false, label:'💵 استخدام سعر الصرف (الدولار) — للدول اللي عملتها متذبذبة زي السودان' },
   { key:'fx_name', type:'text', def:'الدولار', label:'اسم العملة الأجنبية لسعر الصرف' },
   { key:'fx_symbol', type:'text', def:'$', label:'رمز العملة الأجنبية' },
@@ -14401,6 +14671,7 @@ function menuFeatureOk(target) {
   if (target === '__vat_report__') return taxOn();
   if (['__warehouses__','__transfers__','__warehouse_stock_report__'].includes(target)) return !!feat('multi_warehouse');
   if (target === '__barcode_labels__') return !!feat('barcode');
+  if (target === '__expiry__') return pharmacyOn();
   return true;
 }
 // إخفاء عناصر داخل الشاشات حسب المميزات (بعد كل رسم)
@@ -14590,7 +14861,7 @@ function renderItemPickerModal() {
   const ctx = state.itemPickerContext || {};
   const results = !q ? state.items : state.items.filter(it =>
     (it.sku||'').toLowerCase().includes(q) || (it.name||'').toLowerCase().includes(q) ||
-    (it.name_en||'').toLowerCase().includes(q) ||
+    (it.name_en||'').toLowerCase().includes(q) || (it.generic_name||'').toLowerCase().includes(q) ||
     (it.brand||'').toLowerCase().includes(q) || (it.model||'').toLowerCase().includes(q) ||
     (it.registry_number||'').toLowerCase().includes(q) || (it.company||'').toLowerCase().includes(q) ||
     (state.itemAltNumbersMap[it.id]||[]).some(alt => alt.toLowerCase().includes(q))
@@ -14781,6 +15052,7 @@ function readFormFromDom() {
   if (val('f-price2') !== undefined) f.price2 = val('f-price2');
   if (val('f-price3') !== undefined) f.price3 = val('f-price3');
   if (val('f-price_usd') !== undefined) f.price_usd = val('f-price_usd');
+  ['generic_name', 'pack_unit', 'pack_factor', 'pack_price'].forEach(k => { if (val('f-' + k) !== undefined) f[k] = val('f-' + k); });
   if (val('f-cost_usd') !== undefined) f.cost_usd = val('f-cost_usd');
   if (val('f-discount_percent') !== undefined) f.discount_percent = val('f-discount_percent');
   if (val('f-vat_applicable') !== undefined) f.vat_applicable = val('f-vat_applicable') === 'true';
@@ -15185,6 +15457,7 @@ function bindAppEvents() {
       state.showAlertsPanel = false;
       const target = el.dataset.alertTarget;
       if (target === '__fx__') { state.showFx = true; render(); return; }
+      if (target === '__expiry__') { state.expFilter = 'near'; openExpiryReport(); return; }
       if (target === '__transfers_reqs__' || target === '__transfers_inbound__') {
         await loadTransfers(); state.transferFilterStatus = target === '__transfers_reqs__' ? 'مطلوب' : 'مرسل';
         state.activeSection = '__transfers__'; render(); return;
@@ -15266,6 +15539,7 @@ function bindAppEvents() {
       state.openDropdown = null;
       const target = btn.dataset.submenuTarget || btn.dataset.submenu;
       if (!canOpenTarget(target)) { showToast('ما عندك صلاحية فتح هذه الشاشة — اطلبها من المدير', 'error'); return; }
+      if (target === '__expiry__') { state.openDropdown = null; openExpiryReport(); return; }
       if (target === '__report_sales_invoices__') { openInvStmt('sales'); return; }
       if (target === '__item_sale_prices__') { if (!state.parties?.length) await loadParties(); openPriceHistory('', 'report'); return; }
       if (target === '__sys_features__' || target === '__account_mapping__') {
@@ -16153,9 +16427,13 @@ function bindAppEvents() {
                     : markup > 0 ? Math.round(cost * (Number(state.purchaseForm.exchange_rate) || 1) * (1 + markup/100) * 100) / 100
                     : Number(item.price || 0);
         }
-        const existingLine = state.purchaseForm.lines.find(l => l.item_id === itemId);
+        const batchNo = pharmacyOn() ? String(document.getElementById('pi-item-batch')?.value || '').trim() : '';
+        const expDate = pharmacyOn() ? (document.getElementById('pi-item-exp')?.value || '') : '';
+        if (pharmacyOn() && expDate && expDate < phToday() && !confirm(`⚠️ تاريخ الصلاحية (${expDate}) منتهي أصلاً. تكمل؟`)) return;
+        // في الصيدلية: نفس الصنف بتشغيلة مختلفة = سطر منفصل
+        const existingLine = state.purchaseForm.lines.find(l => l.item_id === itemId && (!pharmacyOn() || ((l.batch_no || '') === batchNo && (l.expiry_date || '') === expDate)));
         if (existingLine) { existingLine.quantity += qty; if (salePrice !== null) existingLine.sale_price = salePrice; }
-        else { state.purchaseForm.lines.push({ item_id: itemId, item_name: item.name, sku: item.sku, unit: item.unit, quantity: qty, unit_cost: cost, tax_percent: taxPct, sale_price: salePrice }); }
+        else { state.purchaseForm.lines.push({ item_id: itemId, item_name: item.name, sku: item.sku, unit: item.unit, quantity: qty, unit_cost: cost, tax_percent: taxPct, sale_price: salePrice, ...(pharmacyOn() ? { batch_no: batchNo, expiry_date: expDate } : {}) }); }
         if (salePrice !== null) showToast(`سعر بيع "${item.name}" بيتحدّث إلى ${fmt(salePrice)} عند ترحيل الفاتورة`);
         render();
       };
@@ -16220,7 +16498,8 @@ function bindAppEvents() {
         const lineRows = f.lines.map(l => {
           const sub = l.quantity * l.unit_cost;
           const tax = sub * (Number(taxPctOf(l)) / 100);
-          return { item_id: l.item_id, quantity: l.quantity, unit_cost: l.unit_cost, line_total: sub, tax_percent: taxPctOf(l), tax_amount: tax, total_with_tax: sub + tax, sale_price: (l.sale_price != null && !isNaN(Number(l.sale_price))) ? Number(l.sale_price) : null };
+          return { item_id: l.item_id, quantity: l.quantity, unit_cost: l.unit_cost, line_total: sub, tax_percent: taxPctOf(l), tax_amount: tax, total_with_tax: sub + tax, sale_price: (l.sale_price != null && !isNaN(Number(l.sale_price))) ? Number(l.sale_price) : null,
+            ...(pharmacyOn() ? { batch_no: (l.batch_no || '').trim() || null, expiry_date: l.expiry_date || null } : {}) };
         });
 
         if (state.editingPurchaseId) {
@@ -16253,6 +16532,10 @@ function bindAppEvents() {
       if (document.getElementById('purchase-approve')) {
         document.getElementById('purchase-approve').onclick = async () => {
           const f = state.purchaseForm;
+          if (pharmacyOn()) {
+            const noExp = f.lines.filter(l => !l.expiry_date);
+            if (noExp.length && !confirm(`💊 في ${noExp.length} صنف بدون تاريخ صلاحية:\n${noExp.slice(0, 6).map(l => '• ' + l.item_name).join('\n')}\n\nديل ما بيدخلوا في متابعة الصلاحية. تكمل الترحيل؟`)) return;
+          }
           if (!(await checkFiscalPeriodAllowed(f.invoice_date))) return;
           const t0 = calcPurchaseTotals(f);
           if (Number(f.paid_amount) > t0.grandTotal) {
@@ -16814,6 +17097,11 @@ function bindAppEvents() {
             return;
           }
           if (!confirm(`⚠️ الرصيد المتوفر من "${item.name}" هو ${availQty} فقط — البيع بيخلّي الرصيد بالسالب.${otherTxt}\n\nتكمل؟`)) return;
+        }
+        if (pharmacyOn() && itemBatches(item.id).length) {
+          const inForm = state.salesForm.lines.filter(l => l.item_id === itemId).reduce((s2, l) => s2 + Number(l.quantity || 0), 0);
+          const valid = itemValidQty(item), exQ = itemExpiredQty(item);
+          if (qty + inForm > valid && !confirm(`⚠️ الصالح من "${item.name}" ${valid} بس${exQ ? ` — و${exQ} منتهي الصلاحية` : ''}.\n\nتكمل البيع؟`)) return;
         }
         const priceBeforeTax = (state.salesForm.price_mode === 'شامل الضريبة' && taxPct > 0) ? price / (1 + taxPct/100) : price;
         if (priceBeforeTax < Number(item.cost || 0)) {
@@ -22062,6 +22350,7 @@ function bindAppEvents() {
         shape: txt(f.shape), specs: txt(f.specs), usage_type: txt(f.usage_type), volume: txt(f.volume),
         cost: num(f.cost) || 0, price: Number(f.price), price2: num(f.price2), price3: num(f.price3),
         ...(fxOn() ? { price_usd: num(f.price_usd), cost_usd: num(f.cost_usd) } : {}),
+        ...(pharmacyOn() ? { generic_name: String(f.generic_name || '').trim() || null, pack_unit: String(f.pack_unit || '').trim() || null, pack_factor: num(f.pack_factor), pack_price: num(f.pack_price) } : {}),
         discount_percent: num(f.discount_percent) || 0, vat_applicable: !!f.vat_applicable, pricing_method: f.pricing_method || 'fixed_value',
         competitor1_name: txt(f.competitor1_name), competitor1_price: num(f.competitor1_price),
         competitor2_name: txt(f.competitor2_name), competitor2_price: num(f.competitor2_price),
