@@ -581,10 +581,35 @@ function attachWindowDragging() {
   });
 }
 
+
+// =====================================================================
+// ثيم الصيدلية: ألوان أخضر طبي بدل الكحلي (نفس البرنامج، شكل مختلف)
+// =====================================================================
+const PH_COLORS = [
+  [/#1B3352/gi, '#0B4F4A'], [/#2C4A6E/gi, '#11706A'], [/#3D6389/gi, '#1A8C83'], [/#1B5FA8/gi, '#0E8C7E'], [/#2E86C1/gi, '#14A397'],
+  [/#B8C8DC/gi, '#B5DCD6'], [/#F0F6FC/gi, '#EEF8F6'], [/#E8EEF5/gi, '#E3F2EF'], [/#E6F1FB/gi, '#E2F4F1'], [/#132A44/gi, '#083B37'],
+  [/#6C3FA8/gi, '#0F7C6E'], [/#8E5BC7/gi, '#2BA58A'], [/#4A7DC0/gi, '#2BA58A'], [/#2E5C8A/gi, '#1A8C83'], [/#0F1E33/gi, '#062B28'],
+  [/#7A8CA8/gi, '#6FA39C'], [/rgba\(27,\s*51,\s*82,/g, 'rgba(11,79,74,'], [/rgba\(44,\s*74,\s*110,/g, 'rgba(17,112,106,'],
+];
+function phTheme(html) { if (!pharmacyOn() || typeof html !== 'string') return html; for (const [re, v] of PH_COLORS) html = html.replace(re, v); return html; }
+function applyThemeStyles() {
+  const on = pharmacyOn();
+  document.querySelectorAll('style').forEach(st => {
+    if (st.dataset.phOrig === undefined) { if (!on) return; st.dataset.phOrig = st.textContent; }
+    const want = on ? phTheme(st.dataset.phOrig) : st.dataset.phOrig;
+    if (st.textContent !== want) st.textContent = want;
+  });
+  document.body.classList.toggle('ph-theme', on);
+  const mt = document.querySelector('meta[name="theme-color"]'); if (mt) mt.setAttribute('content', on ? '#0B4F4A' : '#1B3352');
+  document.title = on ? 'Coin Pharma — كوين فارما' : 'Coin Soft ERP — كوين سوفت';
+}
+function appBrandName() { return pharmacyOn() ? '💊 Coin Pharma' : 'Coin Soft ERP'; }
+
 function render() {
   const root = document.getElementById('root');
+  try { applyThemeStyles(); } catch (e) {}
   if (state.licenseExpired) {
-    root.innerHTML = renderLicenseExpiredScreen();
+    root.innerHTML = phTheme(renderLicenseExpiredScreen());
     const btn = document.getElementById('lic-activate');
     if (btn) btn.onclick = activateLicenseFromLockScreen;
     const pass = document.getElementById('lic-pass');
@@ -592,11 +617,11 @@ function render() {
     return;
   }
   if (!state.session) {
-    root.innerHTML = renderAuth();
+    root.innerHTML = phTheme(renderAuth());
     bindAuthEvents();
   } else {
     document.querySelectorAll('body > #active-item-bar').forEach(el => el.remove()); // نسخة قديمة أُضيفت مباشرة للصفحة — render يرسم البار من جديد
-    root.innerHTML = withBranchQty(renderApp);
+    root.innerHTML = phTheme(withBranchQty(renderApp));
     bindAppEvents();
     try { tickHomeClock(); } catch (e) {}
     attachWindowDragging();
@@ -1038,8 +1063,8 @@ function renderAuth() {
           <line x1="100" y1="45" x2="140" y2="150" stroke="#fff" stroke-width="13" stroke-linecap="round"/>
           <line x1="72" y1="118" x2="128" y2="118" stroke="#22C55E" stroke-width="11" stroke-linecap="round"/>
         </svg>
-        <div style="font-family:'Tajawal',sans-serif;font-weight:700;font-size:24px;margin-bottom:6px;">${t('system_name')}</div>
-        <div style="font-size:13px;opacity:0.85;max-width:280px;margin-bottom:32px;">${t('system_tagline')}</div>
+        <div style="font-family:'Tajawal',sans-serif;font-weight:700;font-size:24px;margin-bottom:6px;">${pharmacyOn() ? (state.lang === 'en' ? '💊 Coin Pharma' : '💊 كوين فارما') : t('system_name')}</div>
+        <div style="font-size:13px;opacity:0.85;max-width:280px;margin-bottom:32px;">${pharmacyOn() ? (state.lang === 'en' ? 'Integrated pharmacy management: sales, stock, expiry & accounting' : 'نظام متكامل لإدارة الصيدليات: المبيعات والمخزون والصلاحية والحسابات') : t('system_tagline')}</div>
         <div style="display:flex;gap:22px;flex-wrap:wrap;justify-content:center;max-width:320px;">
           ${[['ti-package',t('feat_inventory')],['ti-file-invoice',t('feat_invoices')],['ti-users',t('feat_customers')],['ti-chart-bar',t('feat_reports')]].map(([icon,label]) => `
             <div style="display:flex;flex-direction:column;align-items:center;gap:6px;">
@@ -2826,7 +2851,7 @@ function renderApp() {
     </div>` : ''}
     <div style="border:1px solid #1B3352;border-radius:4px;box-shadow:0 6px 24px rgba(0,0,0,0.35);flex:1;display:flex;flex-direction:column;">
       <div class="win-title" style="border-radius:4px 4px 0 0;">
-        <span><img src="icon-192.png" style="height:20px;width:20px;vertical-align:middle;margin-left:8px;border-radius:5px;" onerror="this.style.display='none'" />Coin Soft ERP${branchChip()}${fxChip()}</span>
+        <span><img src="icon-192.png" style="height:20px;width:20px;vertical-align:middle;margin-left:8px;border-radius:5px;" onerror="this.style.display='none'" />${appBrandName()}${branchChip()}${fxChip()}</span>
       </div>
       <div style="background:#fff;border-bottom:1px solid #A9A48C;display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:0 8px;position:relative;">
         <div style="padding:0 4px;">${langToggleBtn(false)}</div>
@@ -4601,7 +4626,7 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
-const APP_VERSION = '2026.10.11-7';
+const APP_VERSION = '2026.10.11-8';
 function renderHomeSection() {
   const c = state.company || {};
   const phones = [
@@ -7249,7 +7274,7 @@ function renderActiveItemBar() {
 }
 function refreshActiveItemBar() {
   const bar = document.getElementById('active-item-bar');
-  const html = renderActiveItemBar();
+  const html = phTheme(renderActiveItemBar());
   if (bar) { if (html) bar.outerHTML = html; else bar.remove(); }
   else if (html) document.body.insertAdjacentHTML('beforeend', html);
 }
