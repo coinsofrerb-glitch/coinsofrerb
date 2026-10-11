@@ -150,7 +150,19 @@ if (!APP_CONFIG.SUPABASE_URL || !APP_CONFIG.SUPABASE_KEY) {
 }
 const SUPABASE_URL = APP_CONFIG.SUPABASE_URL;
 const SUPABASE_KEY = APP_CONFIG.SUPABASE_KEY;
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+// متابعة حالة الإنترنت: أي طلب ينجح = متصل، وأي فشل شبكة = مقطوع (للبيع بدون إنترنت)
+window.__net = { ok: Date.now(), offline: (typeof navigator !== 'undefined' && navigator.onLine === false) };
+const __netFetch = async (...a) => {
+  try {
+    const r = await fetch(...a); window.__net.ok = Date.now();
+    if (window.__net.offline) { window.__net.offline = false; window.dispatchEvent(new Event('cs-online')); }
+    return r;
+  } catch (e) {
+    if (e && e.name !== 'AbortError' && !window.__net.offline) { window.__net.offline = true; window.dispatchEvent(new Event('cs-offline')); }
+    throw e;
+  }
+};
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, { global: { fetch: __netFetch } });
 
 // ============================================
 // الترخيص بسيريال موقّع إلكترونياً (ECDSA P-256)
@@ -1173,6 +1185,7 @@ function bindAuthEvents() {
       await loadPaymentMethods();
       if (!branchApplied && branchPickNeeded()) { state.branchPickOpen = true; state.branchPickClosable = false; }
       logActivity('تسجيل دخول', userBranchId() ? branchName(userBranchId()) : '');
+      scheduleOfflineSnapshot(); loadOfflineQueue().then(() => { if (OFF.queue.length) syncOfflineQueue(); });
       loadAlerts().then(() => render()); // بالخلفية، ما نوقف تسجيل الدخول لحد ما يخلص
     } catch (e) {
       state.authError = translateAuthError(e.message);
@@ -1653,6 +1666,13 @@ function filteredSalesInvoices() {
   if (state.salesFilterToNum.trim()) { const to = extractNum(state.salesFilterToNum); if (to !== null) list = list.filter(x => { const n = extractNum(x.invoice_number); return n !== null && n <= to; }); }
   return list;
 }
+function buildSalesPayload(f) {
+  const t = calcLineTotals(f);
+  const headerPayload = { invoice_type:f.invoice_type, customer_id:f.customer_id||null, walkin_customer_name: !f.customer_id ? (f.walkin_customer_name||null) : null, walkin_customer_tax_number: (!f.customer_id && !f.no_tax) ? (f.walkin_customer_tax_number||null) : null, walkin_customer_address: (!f.customer_id && !f.no_tax) ? (f.walkin_customer_address||null) : null, customer_ref:f.customer_ref||null, order_number:f.order_number||null, warehouse_id: f.warehouse_id||null, payment_method: f.payment_method||null, quotation_id:f.quotation_id||null, invoice_date:f.invoice_date, discount:t.discount, paid_amount:Number(f.paid_amount)||0, notes:f.notes||null, subtotal:t.subtotal, tax_total:t.taxTotal, total:t.grandTotal, no_tax:!!f.no_tax, sales_rep_id: f.sales_rep_id||null, customer_mobile: f.customer_mobile||null, payment_details: (f.payments||[]).length ? f.payments : null, customer_national_address: f.national_address && Object.values(f.national_address).some(Boolean) ? f.national_address : null,
+    ...(fxOn() && fxRate() ? { exchange_rate: Number(f.exchange_rate) || fxRate() } : {}) };
+  const lineRows = f.lines.map(l => { const sub=lineAmt(l), tax=sub*(Number(taxPctOf(l))/100); return { item_id:l.item_id, quantity:l.quantity, unit_price:l.unit_price, discount_percent:Number(l.disc_pct)||0, tax_percent:taxPctOf(l), tax_amount:tax, line_total:sub, total_with_tax:sub+tax }; });
+  return { headerPayload, lineRows, t };
+}
 function newSalesForm() {
   return { invoice_number:'', invoice_type:'نقدي', price_mode:'قبل الضريبة', default_tax:String(vatRate()), no_tax:!taxOn(), customer_id:'', walkin_customer_name:'', walkin_customer_tax_number:'', walkin_customer_address:'', cash_customer_mode:'walkin', customer_ref:'', order_number:'', warehouse_id: defaultWarehouseId(), quotation_id:null, quotation_number_display:'', invoice_date:new Date().toISOString().slice(0,10), discount:'0', paid_amount:'0', notes:'', lines:[], approved:false, sales_rep_id:'', customer_mobile:'', national_address:{}, payments:[] };
 }
@@ -1665,6 +1685,7 @@ async function openSalesById(id) {
     customer_id: inv.customer_id, walkin_customer_name: inv.walkin_customer_name||'', walkin_customer_tax_number: inv.walkin_customer_tax_number||'', walkin_customer_address: inv.walkin_customer_address||'', cash_customer_mode: inv.customer_id ? 'registered' : 'walkin', customer_ref: inv.customer_ref||'', order_number: inv.order_number||'', warehouse_id: inv.warehouse_id || defaultWarehouseId(), quotation_id: inv.quotation_id||null,
     quotation_number_display: '', invoice_date: inv.invoice_date, discount: String(inv.discount||0), paid_amount: String(inv.paid_amount||0),
     notes: inv.notes||'', approved: !!inv.approved,
+    exchange_rate: inv.exchange_rate || null,
     sales_rep_id: inv.sales_rep_id||'', customer_mobile: inv.customer_mobile||'', national_address: inv.customer_national_address||{}, payments: Array.isArray(inv.payment_details) ? inv.payment_details : [],
     lines: (lineRows||[]).map(l => ({ item_id:l.item_id, item_name:l.items?.name||'', sku:l.items?.sku||'', unit:l.items?.unit||'', quantity:Number(l.quantity), unit_price:Number(l.unit_price), disc_pct:Number(l.discount_percent||0), tax_percent:Number(taxPctOf(l)) })),
   };
@@ -2466,6 +2487,7 @@ async function loadProfile() {
   const { data } = await sb.from('profiles').select('*').eq('id', state.session.user.id).single();
   state.profile = data || null;
   await loadMyPermissions();
+  await loadFxRates();
 }
 
 // ينشئ مستخدم جديد بدون ما يأثر على جلسة المدير الحالية (يستخدم عميل مؤقت منفصل)
@@ -2618,6 +2640,18 @@ function installPermGuard() {
       e.preventDefault(); e.stopImmediatePropagation();
       showToast(`ما عندك صلاحية «${PERM_LABEL[action]}» في هذه الشاشة — اطلبها من المدير`, 'error');
     }
+  }, true);
+  // بدون إنترنت: فاتورة البيع تتحفظ في الجهاز، وباقي الحفظ يتمنع برسالة واضحة
+  document.addEventListener('click', async e => {
+    const btn = e.target.closest && e.target.closest('button[id]'); if (!btn) return;
+    const isSave = /-(save|approve|receive|send)$/.test(btn.id) || btn.id === 'quote-convert';
+    if (!isSave) return;
+    if (btn.id === 'sales-save') {
+      if (!isOffline() && Date.now() - (window.__net.ok || 0) > 15000) { e.preventDefault(); e.stopImmediatePropagation(); await netPing(); if (!isOffline()) { btn.onclick && btn.onclick(); return; } }
+      if (isOffline()) { e.preventDefault(); e.stopImmediatePropagation(); saveSalesOffline(); }
+      return;
+    }
+    if (isOffline()) { e.preventDefault(); e.stopImmediatePropagation(); showToast('ما في إنترنت — الحفظ هنا محتاج نت. فواتير البيع بس بتشتغل بدون نت', 'error'); }
   }, true);
 }
 installPermGuard();
@@ -2777,6 +2811,7 @@ function renderApp() {
   );
   return `
   <div style="width:100%;margin:0;padding:0;min-height:100vh;display:flex;flex-direction:column;">
+    ${offlineBanner()}
     ${state.licenseWarningDays !== null ? `
     <div class="no-print" style="background:#FDF6E8;border:1px solid #BA7517;border-radius:6px;padding:8px 14px;margin-bottom:10px;display:flex;align-items:center;gap:8px;font-size:12.5px;color:#3A3826;">
       <i class="ti ti-alert-triangle" style="color:#BA7517;font-size:16px;"></i>
@@ -2785,7 +2820,7 @@ function renderApp() {
     </div>` : ''}
     <div style="border:1px solid #1B3352;border-radius:4px;box-shadow:0 6px 24px rgba(0,0,0,0.35);flex:1;display:flex;flex-direction:column;">
       <div class="win-title" style="border-radius:4px 4px 0 0;">
-        <span><img src="icon-192.png" style="height:20px;width:20px;vertical-align:middle;margin-left:8px;border-radius:5px;" onerror="this.style.display='none'" />Coin Soft ERP${branchChip()}</span>
+        <span><img src="icon-192.png" style="height:20px;width:20px;vertical-align:middle;margin-left:8px;border-radius:5px;" onerror="this.style.display='none'" />Coin Soft ERP${branchChip()}${fxChip()}</span>
       </div>
       <div style="background:#fff;border-bottom:1px solid #A9A48C;display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:0 8px;position:relative;">
         <div style="padding:0 4px;">${langToggleBtn(false)}</div>
@@ -2859,6 +2894,8 @@ function renderApp() {
   ${state.showBranchCompare ? renderBranchCompareModal() : ''}
   ${state.showClientsBoard ? renderClientsBoard() : ''}
   ${state.showRenew ? renderRenewModal() : ''}
+  ${state.showFx ? renderFxModal() : ''}
+  ${state.showOffQueue ? renderOfflineQueueModal() : ''}
   ${state.showReportDesigner ? renderReportDesignerModal() : ''}
   ${state.showFixedAssets ? renderFixedAssetsModal() : ''}
   ${state.showEmployees ? renderEmployeesModal() : ''}
@@ -4554,7 +4591,7 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
-const APP_VERSION = '2026.10.11-3';
+const APP_VERSION = '2026.10.11-5';
 function renderHomeSection() {
   const c = state.company || {};
   const phones = [
@@ -4626,6 +4663,7 @@ function renderHomeSection() {
                 ${homeShortcut('ti-cash', t('sc_receipt'), '__receipt_vouchers__')}
                 ${homeShortcut('ti-chart-bar', t('sc_reports'), 'تقارير عامة')}
               </div>
+              ${homeSpeedCard()}
             </div>
           </div>
         </div>
@@ -4692,7 +4730,7 @@ function homeAnalyticsPanel() {
           <div style="font-size:14px;font-weight:700;color:#1B3352;"><i class="ti ti-chart-dots" style="color:#7F7FD5;"></i> نظرة سريعة</div>
           <div style="display:flex;gap:10px;">
             ${tile('ti-cash', 'مبيعات اليوم', fmt(sum(tInv)), `${delta(sum(tInv), sum(yInv), 'عن أمس')} <span style="opacity:.85;">· ${tInv.length} فاتورة</span>`, 'linear-gradient(135deg,#11998E,#38C98B)')}
-            ${tile('ti-calendar-stats', 'مبيعات الشهر', fmt(sum(mInv)), `${delta(sum(mInv), sum(pInv), 'عن الشهر الماضي')}`, 'linear-gradient(135deg,#2C4A6E,#4A7DC0)')}
+            ${tile('ti-calendar-stats', 'مبيعات الشهر', fmt(sum(mInv)), `${delta(sum(mInv), sum(pInv), 'عن الشهر الماضي')}${fxOn() && fxRate() ? ` <span style="opacity:.9;">· ≈ ${fxFmtUsd(mInv.reduce((s2, i) => s2 + fxUsd(i.total, i.exchange_rate || fxRate()), 0))}</span>` : ''}`, 'linear-gradient(135deg,#2C4A6E,#4A7DC0)')}
           </div>
           <div style="border:1px solid #E4E8F0;border-radius:10px;padding:10px 12px 4px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:2px;"><span style="font-size:12px;font-weight:600;color:#1B3352;"><i class="ti ti-chart-bar" style="color:#7F7FD5;"></i> إجمالي المبيعات لكل شهر</span><span style="font-size:10.5px;color:#8B8A7A;"><i style="display:inline-block;width:9px;height:9px;border-radius:3px;background:#F7971E;margin-left:4px;vertical-align:-1px;"></i>الشهر الحالي</span></div>${bars}
@@ -5893,6 +5931,7 @@ function renderSalesFormModal() {
             ${(f.no_tax || !taxOn()) ? (Number(tot.discount) ? line('الصافي', 'Net', fmt(tot.net)) : '') : line('الإجمالي الخاضع للضريبة', 'Taxable Amount', fmt(tot.net))}
             ${(f.no_tax || !taxOn()) ? '' : line('ضريبة القيمة المضافة', 'VAT', fmt(tot.taxTotal))}
             ${line('الإجمالي المستحق', 'Grand Total', fmt(tot.grandTotal) + ' <span style="font-size:10px;">' + escapeHtml(feat('currency_abbr_ar')||'') + '</span>', true)}
+            ${fxOn() && (Number(f.exchange_rate) || fxRate()) ? line(`المعادل بـ${fxName()} (سعر ${Number(f.exchange_rate || fxRate()).toLocaleString('en-US')})`, 'USD Equivalent', fxFmtUsd(fxUsd(tot.grandTotal, f.exchange_rate || fxRate())), false, '#0F6E56') : ''}
             ${line('المدفوع', 'Paid', fmt(Number(f.paid_amount)||0))}
             ${line('المتبقي', 'Balance Due', fmt(due), false, due > 0.005 ? '#C0392B' : '#0F6E56')}
           </table>
@@ -11028,6 +11067,12 @@ function renderTabContent() {
       ${field('سعر البيع 1 *', `<input id="f-price" class="input ${e.price?'err':''}" value="${escapeHtml(f.price)}" />`)}
       ${field('سعر البيع 2', `<input id="f-price2" class="input" value="${escapeHtml(f.price2)}" />`)}
       ${field('سعر البيع 3', `<input id="f-price3" class="input" value="${escapeHtml(f.price3)}" />`)}
+      ${fxOn() ? `<div style="grid-column:1/-1;border:1px solid #CFE6DD;background:#F4F9F7;border-radius:10px;padding:10px 12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:end;">
+        <div style="grid-column:1/-1;font-size:12px;font-weight:700;color:#0F6E56;">💵 السعر بـ${escapeHtml(fxName())} (سعر الصرف الحالي ${fxRate() ? fxRate().toLocaleString('en-US') : '—'})</div>
+        ${field('سعر البيع بالدولار', `<div style="display:flex;gap:6px;"><input id="f-price_usd" class="input mono" value="${escapeHtml(f.price_usd ?? '')}" placeholder="مثال: 12.5" /><button type="button" data-fx-calc-price class="btn" style="white-space:nowrap;padding:4px 10px;font-size:11.5px;">احسب بالجنيه ←</button></div>`)}
+        ${field('التكلفة بالدولار (للمعلومة)', `<input id="f-cost_usd" class="input mono" value="${escapeHtml(f.cost_usd ?? '')}" />`)}
+        <div style="grid-column:1/-1;font-size:10.5px;color:#5F5E5A;">الأصناف اللي ليها سعر بالدولار، أسعارها بالجنيه بتتحدّث كلها بضغطة من 💵 فوق لما يتغيّر سعر الصرف.</div>
+      </div>` : ''}
       <div style="grid-column:1/-1;font-size:10.5px;color:#8B8A7A;margin-top:-6px;">💡 سعر2 وسعر3 يُطبّقون تلقائياً بفاتورة البيع حسب "مستوى السعر" المسجّل بكرت كل عميل</div>
       ${field('نسبة الخصم %', `<input id="f-discount_percent" class="input" value="${escapeHtml(f.discount_percent)}" />`)}
       ${field('تطبيق ض.ق.م', `<select id="f-vat_applicable" class="input"><option value="true" ${f.vat_applicable?'selected':''}>نعم</option><option value="false" ${!f.vat_applicable?'selected':''}>لا</option></select>`)}
@@ -11950,6 +11995,370 @@ document.addEventListener('click', async e => {
     N.current = N.list[0]?.id || null; notesRefresh(); return;
   }
 });
+
+// =====================================================================
+// سعر الصرف (الدولار مقابل العملة المحلية) — للسودان والدول اللي عملتها متذبذبة
+// =====================================================================
+function fxEnabled() { return !!feat('fx_enabled'); }
+function fxOn() { return fxEnabled() && !!state.fxReady; }
+function fxLatest() { return (state.fxRates || [])[0] || null; }
+function fxRate() { const r = fxLatest(); return r ? Number(r.rate) : 0; }
+function fxSym() { return feat('fx_symbol') || '$'; }
+function fxName() { return feat('fx_name') || 'الدولار'; }
+function fxToday() { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); }
+function fxStale() { const r = fxLatest(); return !r || r.rate_date < fxToday(); }
+function canSetFx() { return isAdmin() || canManageCompany() || canApprove(); }
+function fxRound(v) { const step = Number(feat('fx_round')) || 0; if (!step) return Math.round(v * 100) / 100; return Math.ceil(v / step) * step; }
+function fxUsd(localAmount, rate) { const r = Number(rate) || fxRate(); return r > 0 ? Number(localAmount || 0) / r : 0; }
+function fxFmtUsd(v) { return fxSym() + Number(v || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+async function loadFxRates() {
+  if (!fxEnabled() || !state.session) { state.fxReady = false; return; }
+  const { data, error } = await sb.from('exchange_rates').select('rate_date, rate, created_at').eq('currency', 'USD').order('rate_date', { ascending: false }).limit(90);
+  state.fxReady = !error; state.fxRates = error ? [] : (data || []);
+}
+function fxChip() {
+  if (!fxOn()) return '';
+  const r = fxLatest(), stale = fxStale();
+  return `<button data-fx-open title="سعر الصرف" style="margin-right:8px;background:${stale ? 'rgba(255,193,7,0.25)' : 'rgba(255,255,255,0.15)'};border:1px solid ${stale ? '#FFC107' : 'rgba(255,255,255,0.35)'};color:#fff;border-radius:999px;padding:2px 12px;font-size:12px;cursor:pointer;font-family:inherit;">💵 ${escapeHtml(fxName())}: <b class="mono">${r ? Number(r.rate).toLocaleString('en-US') : '—'}</b>${stale ? ' ⚠️' : ''}</button>`;
+}
+function fxSpark(rates) {
+  const pts = rates.slice(0, 30).reverse(); if (pts.length < 2) return '';
+  const vals = pts.map(r => Number(r.rate)), mn = Math.min(...vals), mx = Math.max(...vals), w = 380, h = 70, pad = 6;
+  const xy = vals.map((v, i) => [pad + i * (w - 2 * pad) / (vals.length - 1), h - pad - (mx === mn ? 0.5 : (v - mn) / (mx - mn)) * (h - 2 * pad)]);
+  const up = vals[vals.length - 1] >= vals[0];
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:70px;"><polyline fill="none" stroke="${up ? '#C0392B' : '#0F6E56'}" stroke-width="2.5" stroke-linejoin="round" points="${xy.map(p => p.map(n => n.toFixed(1)).join(',')).join(' ')}"/>${xy.map((p, i) => i === xy.length - 1 ? `<circle cx="${p[0]}" cy="${p[1]}" r="4" fill="${up ? '#C0392B' : '#0F6E56'}"/>` : '').join('')}</svg>`;
+}
+function renderFxModal() {
+  const rates = state.fxRates || [], r = fxLatest(), cur = feat('currency_abbr_ar') || '';
+  const usdItems = (state.items || []).filter(it => Number(it.price_usd) > 0);
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:60;">
+    <div style="background:#fff;border-radius:14px;width:100%;max-width:520px;max-height:92vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+      <div style="background:linear-gradient(135deg,#0F6E56,#1E9E7A);color:#fff;padding:16px 18px;display:flex;align-items:center;gap:10px;">
+        <span style="font-size:26px;">💵</span>
+        <div style="flex:1;"><div style="font-weight:700;font-size:16px;">سعر الصرف</div><div style="font-size:12px;opacity:.9;">1 ${escapeHtml(fxName())} = ؟ ${escapeHtml(cur)}</div></div>
+        <button data-fx-close style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;"><i class="ti ti-x"></i></button>
+      </div>
+      <div style="padding:16px 18px;">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+          <div style="flex:1;"><div style="font-size:11.5px;color:#6E6D5F;">السعر الحالي</div>
+            <div class="mono" style="font-size:28px;font-weight:800;color:#1B3352;">${r ? Number(r.rate).toLocaleString('en-US') : '—'} <span style="font-size:13px;color:#6E6D5F;">${escapeHtml(cur)}</span></div>
+            <div style="font-size:11px;color:${fxStale() ? '#BA7517' : '#0F6E56'};">${r ? (fxStale() ? `⚠️ آخر تحديث ${escapeHtml(r.rate_date)} — ما اتسجّل سعر اليوم` : `✓ سعر اليوم ${escapeHtml(r.rate_date)}`) : 'ما في سعر مسجّل لسه'}</div>
+          </div>
+        </div>
+        ${canSetFx() ? `<div style="display:flex;gap:8px;align-items:center;background:#F4F9F7;border:1px solid #CFE6DD;border-radius:10px;padding:10px;margin-bottom:12px;">
+          <span style="font-size:12.5px;font-weight:700;color:#0F6E56;white-space:nowrap;">سعر اليوم:</span>
+          <input id="fx-new-rate" class="input mono" inputmode="decimal" style="flex:1;font-size:16px;font-weight:700;" placeholder="${r ? Number(r.rate) : 'مثال: 2450'}" />
+          <button data-fx-save class="btn primary" style="padding:8px 16px;background:#0F6E56;border-color:#0F6E56;">حفظ</button>
+        </div>` : '<div style="font-size:11.5px;color:#8B8A7A;margin-bottom:10px;">تحديث السعر للمدير أو من عنده صلاحية الاعتماد.</div>'}
+        ${rates.length >= 2 ? `<div style="border:1px solid #E4E8F0;border-radius:10px;padding:8px 10px;margin-bottom:12px;"><div style="font-size:11.5px;font-weight:700;color:#1B3352;">حركة السعر (آخر ${Math.min(30, rates.length)} تحديث)</div>${fxSpark(rates)}</div>` : ''}
+        ${canSetFx() && usdItems.length && r ? `<div style="border:1px solid #F0C36D;background:#FFF8E8;border-radius:10px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:#7A5410;">
+          <b>${usdItems.length} صنف</b> مسعّر بالدولار. تحديث سعر البيع بالجنيه حسب السعر الحالي (${Number(r.rate).toLocaleString('en-US')})${Number(feat('fx_round')) ? ` مع التقريب لأقرب ${feat('fx_round')}` : ''}:
+          <button data-fx-reprice class="btn" style="display:block;width:100%;margin-top:8px;padding:7px;background:#BA7517;color:#fff;border-color:#BA7517;"><i class="ti ti-refresh"></i> تحديث أسعار ${usdItems.length} صنف</button>
+        </div>` : ''}
+        <div style="font-size:12px;font-weight:700;color:#1B3352;margin-bottom:6px;">السجل</div>
+        <div style="border:1px solid #E4E2DA;border-radius:10px;overflow:hidden;max-height:240px;overflow-y:auto;">
+          ${rates.map((x, i) => { const prev = rates[i + 1]; const ch = prev ? (Number(x.rate) - Number(prev.rate)) / Number(prev.rate) * 100 : null; return `<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 10px;font-size:12px;background:${i % 2 ? '#F4F1EA' : '#FFFDF6'};">
+            <span class="mono">${escapeHtml(x.rate_date)}</span><b class="mono">${Number(x.rate).toLocaleString('en-US')}</b>
+            <span class="mono" style="min-width:70px;text-align:left;color:${ch == null ? '#8B8A7A' : ch > 0 ? '#C0392B' : ch < 0 ? '#0F6E56' : '#8B8A7A'};">${ch == null ? '—' : (ch > 0 ? '▲ ' : ch < 0 ? '▼ ' : '') + Math.abs(ch).toFixed(1) + '%'}</span></div>`; }).join('') || '<div style="padding:14px;text-align:center;color:#8B8A7A;font-size:12px;">ما في سجل لسه</div>'}
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+async function fxSaveRate() {
+  const v = Number(String(document.getElementById('fx-new-rate')?.value || '').replace(/,/g, ''));
+  if (!(v > 0)) { showToast('اكتب سعر صحيح', 'error'); return; }
+  const prev = fxRate();
+  if (prev && (v > prev * 1.5 || v < prev / 1.5) && !confirm(`السعر الجديد (${v.toLocaleString('en-US')}) مختلف كتير عن السابق (${prev.toLocaleString('en-US')}). متأكد؟`)) return;
+  const { error } = await sb.from('exchange_rates').upsert({ rate_date: fxToday(), currency: 'USD', rate: v }, { onConflict: 'rate_date,currency' });
+  if (error) { showToast('فشل الحفظ: ' + error.message, 'error'); return; }
+  logActivity('تحديث سعر الصرف', `${prev || '—'} ← ${v}`);
+  await loadFxRates(); await loadAlerts().catch(() => {});
+  showToast('تم حفظ سعر اليوم ✓'); render();
+}
+async function fxReprice() {
+  const rate = fxRate(); const list = (state.items || []).filter(it => Number(it.price_usd) > 0);
+  if (!rate || !list.length) return;
+  const changes = list.map(it => ({ it, np: fxRound(Number(it.price_usd) * rate) })).filter(x => Math.abs(x.np - Number(x.it.price || 0)) > 0.004);
+  if (!changes.length) { showToast('كل الأسعار مطابقة لسعر الصرف الحالي ✓'); return; }
+  if (!confirm(`تحديث سعر البيع لـ ${changes.length} صنف حسب سعر الصرف ${rate.toLocaleString('en-US')}؟\n\nمثال: ${changes[0].it.name}: ${fmt(changes[0].it.price)} ← ${fmt(changes[0].np)}`)) return;
+  let ok = 0, fail = 0;
+  for (let i = 0; i < changes.length; i += 15) {
+    const res = await Promise.all(changes.slice(i, i + 15).map(x => sb.from('items').update({ price: x.np }).eq('id', x.it.id)));
+    res.forEach(r => r.error ? fail++ : ok++);
+  }
+  logActivity('تحديث أسعار الأصناف حسب سعر الصرف', `${ok} صنف — سعر ${rate}`);
+  await loadItems();
+  showToast(fail ? `تم تحديث ${ok} صنف، وفشل ${fail}` : `✓ تم تحديث أسعار ${ok} صنف`, fail ? 'error' : 'success'); render();
+}
+function installFxDelegation() {
+  if (window.__fxInstalled) return; window.__fxInstalled = true;
+  document.addEventListener('click', e => {
+    if (e.target.closest('[data-fx-open]')) { state.showFx = true; render(); setTimeout(() => document.getElementById('fx-new-rate')?.focus(), 50); return; }
+    if (e.target.closest('[data-fx-close]')) { state.showFx = false; render(); return; }
+    if (e.target.closest('[data-fx-save]')) { fxSaveRate(); return; }
+    if (e.target.closest('[data-fx-reprice]')) { fxReprice(); return; }
+  });
+  document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target && e.target.id === 'fx-new-rate') fxSaveRate(); });
+  // نقرأ الخانة قبل أي إعادة رسم للنافذة (مرحلة الالتقاط)
+  document.addEventListener('click', e => {
+    if (e.target.closest('[data-fx-calc-price]')) {
+      const usd = Number(document.getElementById('f-price_usd')?.value), r = fxRate(), pe = document.getElementById('f-price');
+      if (!(usd > 0) || !r || !pe) { showToast('اكتب السعر بالدولار وسجّل سعر الصرف أولاً', 'error'); return; }
+      const v = fxRound(usd * r); if (state.form) { state.form.price = String(v); state.form.price_usd = String(usd); } pe.value = v; showToast('✓ ' + fmt(v)); return;
+    }
+  }, true);
+}
+installFxDelegation();
+
+// =====================================================================
+// البيع بدون إنترنت
+//  • نحفظ نسخة من البيانات اللازمة للبيع في الجهاز (IndexedDB) كل ما البرنامج يفتح بالنت
+//  • لو النت قطع: فاتورة البيع تتحفظ في الجهاز برقم مؤقت (OFF-…)، وتترفع براها لما النت يرجع
+//  • الفواتير المرفوعة تتسجل «غير مرحّلة» — تترحّل من شاشة المبيعات زي العادة (المخزون والقيود وقتها)
+// =====================================================================
+const OFF = { db: null, queue: [], booted: false, syncing: false };
+function offRef() { try { return currentProjectRef(); } catch (e) { return 'x'; } }
+function offDb() {
+  if (OFF.db) return Promise.resolve(OFF.db);
+  return new Promise((res, rej) => {
+    try {
+      const rq = indexedDB.open('coinsoft-offline', 1);
+      rq.onupgradeneeded = () => { rq.result.createObjectStore('kv'); };
+      rq.onsuccess = () => { OFF.db = rq.result; res(OFF.db); };
+      rq.onerror = () => rej(rq.error);
+    } catch (e) { rej(e); }
+  });
+}
+async function offGet(key) { try { const db = await offDb(); return await new Promise(res => { const r = db.transaction('kv').objectStore('kv').get(key + ':' + offRef()); r.onsuccess = () => res(r.result); r.onerror = () => res(undefined); }); } catch (e) { return undefined; } }
+async function offSet(key, val) { try { const db = await offDb(); return await new Promise(res => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(val, key + ':' + offRef()); tx.oncomplete = () => res(true); tx.onerror = () => res(false); }); } catch (e) { return false; } }
+function isOffline() { return !!(window.__net && window.__net.offline); }
+function isNetError(err) { return !!err && /fetch|network|load failed|NetworkError/i.test(String(err.message || err)); }
+async function netPing(ms = 3500) {
+  try {
+    const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);
+    await fetch(SUPABASE_URL + '/auth/v1/health', { headers: { apikey: SUPABASE_KEY }, signal: ctl.signal, cache: 'no-store' });
+    clearTimeout(t); window.__net.ok = Date.now(); window.__net.offline = false; return true;
+  } catch (e) { window.__net.offline = true; return false; }
+}
+// ---------- النسخة المحفوظة في الجهاز ----------
+let offSnapTimer = null;
+function scheduleOfflineSnapshot() { clearTimeout(offSnapTimer); offSnapTimer = setTimeout(saveOfflineSnapshot, 2500); }
+async function saveOfflineSnapshot() {
+  if (!state.session || !state.profile || isOffline() || OFF.booted) return;
+  const snap = {
+    at: new Date().toISOString(), userId: state.session.user.id, profile: state.profile, company: state.company,
+    licenseSerial: state.licenseSettings?.serial || null, licenseContact: state.licenseContact || '',
+    items: state.items || [], parties: state.partiesAll || state.parties || [], warehouses: state.warehouses || [],
+    branches: state.branches || [], paymentMethods: state.paymentMethods || [], whStock: state.whStock || null,
+    fxRates: state.fxRates || [], myPermissions: state.myPermissions || {}, altNumbers: state.itemAltNumbersMap || {},
+    branchPrices: state.branchPrices || null,
+  };
+  await offSet('snap', snap);
+}
+async function startOfflineBoot() {
+  const snap = await offGet('snap');
+  if (!snap || !snap.profile || !snap.licenseSerial) return false;
+  {
+    const r = await verifyLicenseSerial(snap.licenseSerial);
+    if (!r.ok) return false;
+    const today = new Date().toISOString().slice(0, 10);
+    if (today > r.data.e) { state.licenseExpired = true; state.licenseReason = 'expired'; state.licenseExpiryDate = r.data.e; state.licenseInfo = r.data; render(); return true; }
+    state.licenseInfo = r.data; state.licenseExpiryDate = r.data.e; state.licenseTrial = !!r.data.t;
+    const daysLeft = Math.ceil((new Date(r.data.e) - new Date(today)) / 86400000);
+    state.licenseWarningDays = (daysLeft <= 14 || r.data.t) ? daysLeft : null;
+  }
+  OFF.booted = true;
+  Object.assign(state, {
+    session: { user: { id: snap.userId } }, profile: snap.profile, company: snap.company, licenseContact: snap.licenseContact,
+    licenseSettings: { serial: snap.licenseSerial }, items: snap.items || [], partiesAll: snap.parties || [], warehouses: snap.warehouses || [],
+    branches: snap.branches || [], branchesReady: !!(snap.branches || []).length, branchesTried: true, paymentMethods: snap.paymentMethods || [],
+    whStock: snap.whStock, fxRates: snap.fxRates || [], fxReady: !!(snap.fxRates || []).length, myPermissions: snap.myPermissions || {},
+    itemAltNumbersMap: snap.altNumbers || {}, branchPrices: snap.branchPrices, salesInvoicesAll: [], salesInvoices: [], purchases: [], purchasesAll: [],
+    offlineSnapAt: snap.at,
+  });
+  refreshBranchScope();
+  await loadOfflineQueue();
+  state.activeSection = 'المبيعات';
+  render();
+  return true;
+}
+// ---------- قائمة الفواتير المنتظرة ----------
+async function loadOfflineQueue() { OFF.queue = (await offGet('queue')) || []; }
+async function saveOfflineQueue() { await offSet('queue', OFF.queue); }
+async function nextOfflineNumber() {
+  let dev = null; try { dev = localStorage.getItem('coinsoft_device'); if (!dev) { dev = Math.random().toString(36).slice(2, 5).toUpperCase(); localStorage.setItem('coinsoft_device', dev); } } catch (e) { dev = 'D'; }
+  const seq = ((await offGet('seq')) || 0) + 1; await offSet('seq', seq);
+  return `OFF-${dev}-${seq}`;
+}
+async function saveSalesOffline() {
+  const f = state.salesForm;
+  if (state.editingSalesId) { alert('ما بتقدر تعدّل فاتورة محفوظة من غير إنترنت — اعمل فاتورة جديدة'); return; }
+  if (f.invoice_type === 'آجل' && !f.customer_id) { alert('اختر العميل — إلزامي لفاتورة آجل'); return; }
+  if (!f.lines.length) { alert('أضف صنف واحد على الأقل'); return; }
+  const { headerPayload, lineRows } = buildSalesPayload(f);
+  if (!f.offline_id) { f.offline_id = 'q' + Date.now(); f.invoice_number = await nextOfflineNumber(); }
+  const entry = { id: f.offline_id, number: f.invoice_number, created_at: new Date().toISOString(), user: state.session?.user?.id || null,
+    branch_id: userBranchId() || null, header: headerPayload, lines: lineRows, total: headerPayload.total, customer: f.walkin_customer_name || state.parties.find(p => p.id === f.customer_id)?.name || 'عميل نقدي', error: null };
+  OFF.queue = OFF.queue.filter(q => q.id !== entry.id).concat(entry);
+  await saveOfflineQueue();
+  // نخصم الكمية من النسخة المحلية عشان الكاشير يشوف رصيد قريب من الحقيقة
+  lineRows.forEach(l => { const it = state.items.find(x => x.id === l.item_id); if (it) it.qty = Number(it.qty || 0) - Number(l.quantity || 0); });
+  showToast(`✓ اتحفظت في الجهاز برقم ${f.invoice_number} — بتترفع لما النت يرجع`);
+  render();
+}
+async function syncOfflineQueue(manual) {
+  if (OFF.syncing || !OFF.queue.length || !state.session) return;
+  if (isOffline() && !(await netPing())) { if (manual) showToast('لسه ما في إنترنت', 'error'); return; }
+  if (OFF.booted) { const { data } = await sb.auth.getSession(); if (!data?.session) { showToast('سجّل الدخول عشان الفواتير المنتظرة تترفع', 'error'); return; } state.session = data.session; }
+  OFF.syncing = true; render();
+  let ok = 0, fail = 0;
+  try {
+    await loadSalesInvoices();
+    for (const q of [...OFF.queue]) {
+      const number = nextDocNumber(state.salesInvoicesAll || state.salesInvoices, 'invoice_number');
+      const header = { ...q.header, notes: [q.header.notes, `أُنشئت بدون إنترنت (${q.number})`].filter(Boolean).join(' — ') };
+      if (q.branch_id && !header.branch_id) header.branch_id = q.branch_id;
+      const { data, error } = await sb.from('sales_invoices').insert({ invoice_number: number, ...header, created_by: state.session.user.id }).select().single();
+      if (error) { q.error = error.message; fail++; if (isNetError(error)) break; continue; }
+      const { error: le } = await sb.from('sales_invoice_items').insert(q.lines.map(l => ({ ...l, invoice_id: data.id })));
+      if (le) { await sb.from('sales_invoices').delete().eq('id', data.id); q.error = le.message; fail++; if (isNetError(le)) break; continue; }
+      OFF.queue = OFF.queue.filter(x => x.id !== q.id); ok++;
+      (state.salesInvoicesAll || state.salesInvoices).push({ ...data });
+      logActivity('رفع فاتورة بيع من وقت انقطاع النت', `${q.number} ← ${data.invoice_number}`);
+    }
+  } finally { OFF.syncing = false; await saveOfflineQueue(); }
+  if (ok) {
+    showToast(`✓ اترفعت ${ok} فاتورة من وقت انقطاع النت — افتحها من المبيعات واضغط «ترحيل»`);
+    if (OFF.booted) { setTimeout(() => location.reload(), 1500); return; }
+    await loadSalesInvoices(); await loadItems(); loadAlerts().then(() => render());
+  }
+  if (fail && manual) showToast(`${fail} فاتورة ما اترفعت — شوف السبب في القائمة`, 'error');
+  render();
+}
+function offlineBanner() {
+  const n = OFF.queue.length;
+  if (!isOffline() && !n) return '';
+  const off = isOffline();
+  return `<div class="no-print" style="background:${off ? '#3A3A3A' : '#FFF3D6'};color:${off ? '#fff' : '#7A5410'};padding:7px 14px;display:flex;align-items:center;gap:10px;font-size:12.5px;flex-wrap:wrap;">
+    <i class="ti ${off ? 'ti-wifi-off' : 'ti-cloud-upload'}" style="font-size:18px;"></i>
+    <span style="flex:1;min-width:200px;">${off ? `<b>بدون إنترنت</b> — تقدر تكمل <b>فواتير البيع</b> عادي، بتتحفظ في الجهاز وتترفع براها لما النت يرجع.${state.offlineSnapAt ? ` (بيانات الأصناف من ${escapeHtml(new Date(state.offlineSnapAt).toLocaleString('ar-SA-u-nu-latn', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))})` : ''}` : `<b>${n} فاتورة</b> محفوظة في الجهاز من وقت انقطاع النت ${OFF.syncing ? '— جاري الرفع…' : 'ما اترفعت لسه'}`}</span>
+    ${n ? `<button data-off-list class="btn" style="padding:3px 10px;font-size:11.5px;">الفواتير المنتظرة (${n})</button>` : ''}
+    ${n && !off && !OFF.syncing ? `<button data-off-sync class="btn primary" style="padding:3px 10px;font-size:11.5px;"><i class="ti ti-cloud-upload"></i> رفع الآن</button>` : ''}
+  </div>`;
+}
+function renderOfflineQueueModal() {
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:60;">
+    <div style="background:#fff;border-radius:14px;width:100%;max-width:620px;max-height:90vh;display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+      <div class="win-title"><span><i class="ti ti-cloud-upload"></i> فواتير محفوظة في الجهاز (منتظرة الرفع)</span><button data-off-close style="width:18px;height:18px;background:#D9534F;border:none;border-radius:2px;cursor:pointer;display:flex;align-items:center;justify-content:center;"><i class="ti ti-x" style="color:#fff;font-size:12px;"></i></button></div>
+      <div style="padding:12px 16px;overflow-y:auto;">
+        ${OFF.queue.map(q => `<div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid #E4E2DA;border-radius:10px;margin-bottom:6px;">
+          <div style="flex:1;"><div style="font-weight:700;color:#1B3352;" class="mono">${escapeHtml(q.number)}</div>
+            <div style="font-size:11px;color:#6E6D5F;">${escapeHtml(q.customer)} · ${escapeHtml(new Date(q.created_at).toLocaleString('ar-SA-u-nu-latn', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }))} · ${q.lines.length} صنف</div>
+            ${q.error ? `<div style="font-size:10.5px;color:#C0392B;">آخر محاولة: ${escapeHtml(q.error)}</div>` : ''}</div>
+          <b class="mono">${fmt(q.total)}</b>
+          <button data-off-del="${q.id}" class="btn" style="padding:3px 8px;font-size:11px;color:#C0392B;" title="حذف"><i class="ti ti-trash"></i></button>
+        </div>`).join('') || '<div style="padding:16px;text-align:center;color:#8B8A7A;">ما في فواتير منتظرة ✓</div>'}
+        <div style="font-size:11px;color:#8B8A7A;margin-top:6px;">بعد الرفع، الفاتورة بتظهر في المبيعات برقم عادي وتحتاج <b>ترحيل</b> زي أي فاتورة (المخزون والقيود بتتسجل وقت الترحيل).</div>
+      </div>
+      <div style="padding:10px 16px;border-top:1px solid #E4E2DA;display:flex;gap:8px;">
+        <button data-off-sync class="btn primary" style="padding:6px 14px;" ${isOffline() || OFF.syncing ? 'disabled' : ''}><i class="ti ti-cloud-upload"></i> رفع الآن</button>
+      </div>
+    </div>
+  </div>`;
+}
+function installOfflineHandlers() {
+  if (window.__offInstalled) return; window.__offInstalled = true;
+  const onOff = () => { window.__net.offline = true; render(); };
+  const onOn = async () => { if (await netPing()) { render(); syncOfflineQueue(); } };
+  window.addEventListener('offline', onOff); window.addEventListener('cs-offline', onOff);
+  window.addEventListener('online', onOn); window.addEventListener('cs-online', () => { render(); syncOfflineQueue(); });
+  setInterval(async () => { if (isOffline() || OFF.queue.length) { if (await netPing()) { if (OFF.queue.length) syncOfflineQueue(); else render(); } } }, 30000);
+  setInterval(() => scheduleOfflineSnapshot(), 5 * 60000);
+  document.addEventListener('click', async e => {
+    if (e.target.closest('[data-off-list]')) { state.showOffQueue = true; render(); return; }
+    if (e.target.closest('[data-off-close]')) { state.showOffQueue = false; render(); return; }
+    if (e.target.closest('[data-off-sync]')) { syncOfflineQueue(true); return; }
+    const d = e.target.closest('[data-off-del]');
+    if (d) { if (!confirm('حذف الفاتورة دي نهائياً من الجهاز؟ (ما اترفعت)')) return; OFF.queue = OFF.queue.filter(q => q.id !== d.dataset.offDel); await saveOfflineQueue(); render(); }
+  });
+}
+installOfflineHandlers();
+
+// =====================================================================
+// اختبار سرعة الإنترنت (في الشاشة الرئيسية)
+//  • سرعة التحميل: تنزيل ملف معروف من شبكة توزيع سريعة وحساب الميغابت في الثانية
+//  • الاستجابة (Ping): الزمن اللي بياخده طلب لخادم قاعدة البيانات — ده الأهم لسرعة البرنامج
+// =====================================================================
+const SPEED_URLS = ['https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js', 'https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js'];
+async function runSpeedTest() {
+  const S = state.speed = { running: true, phase: 'ping', mbps: null, ping: null, at: null, error: null };
+  render();
+  try {
+    // 1) الاستجابة: 4 محاولات ونأخذ الوسيط
+    const pings = [];
+    for (let i = 0; i < 4; i++) {
+      const t0 = performance.now();
+      try { await fetch(SUPABASE_URL + '/auth/v1/health', { headers: { apikey: SUPABASE_KEY }, cache: 'no-store' }); pings.push(performance.now() - t0); } catch (e) { }
+    }
+    if (!pings.length) throw new Error('ما في اتصال بالإنترنت');
+    pings.sort((a, b) => a - b); S.ping = Math.round(pings[Math.floor(pings.length / 2)]);
+    S.phase = 'download'; render();
+    // 2) التحميل: نزّل الملفات ونحسب السرعة (نتوقف بعد ~8 ثواني لو النت بطيء)
+    let bytes = 0; const t0 = performance.now(); const deadline = t0 + 8000;
+    for (let round = 0; round < 3 && performance.now() < deadline; round++) {
+      for (const u of SPEED_URLS) {
+        if (performance.now() > deadline) break;
+        const res = await fetch(u + '?speedtest=' + Date.now() + Math.random(), { cache: 'no-store' });
+        const reader = res.body ? res.body.getReader() : null;
+        if (reader) { for (;;) { const { done, value } = await reader.read(); if (done) break; bytes += value.length; S.mbps = (bytes * 8) / ((performance.now() - t0) / 1000) / 1e6; if (performance.now() > deadline) { try { reader.cancel(); } catch (e) {} break; } } }
+        else bytes += (await res.arrayBuffer()).byteLength;
+        S.mbps = (bytes * 8) / ((performance.now() - t0) / 1000) / 1e6;
+        const el = document.getElementById('speed-live'); if (el) el.textContent = S.mbps.toFixed(1);
+      }
+    }
+    S.mbps = Math.round(((bytes * 8) / ((performance.now() - t0) / 1000) / 1e6) * 10) / 10;
+    S.at = new Date().toISOString();
+  } catch (e) { S.error = e.message || 'تعذّر الاختبار'; }
+  S.running = false; render();
+}
+function speedRating(mbps, ping) {
+  if (mbps == null) return null;
+  if (mbps >= 10 && ping < 300) return { l: 'ممتاز', c: '#38C98B' };
+  if (mbps >= 3 && ping < 700) return { l: 'جيد', c: '#7FD1FF' };
+  if (mbps >= 1) return { l: 'مقبول', c: '#FFC107' };
+  return { l: 'ضعيف', c: '#FF6B6B' };
+}
+function homeSpeedCard() {
+  const S = state.speed || {}, off = isOffline();
+  const v = S.mbps != null ? S.mbps : 0, frac = Math.max(0, Math.min(1, Math.log10(1 + v) / Math.log10(101)));
+  const r = 42, cx = 50, cy = 50, a0 = Math.PI, a1 = Math.PI * (1 - frac);
+  const arc = (from, to) => `M ${cx + r * Math.cos(from)} ${cy - r * Math.sin(from)} A ${r} ${r} 0 0 1 ${cx + r * Math.cos(to)} ${cy - r * Math.sin(to)}`;
+  const rate = speedRating(S.mbps, S.ping || 0);
+  return `
+    <div style="margin-top:18px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.15);border-radius:14px;padding:12px 14px;display:flex;align-items:center;gap:14px;">
+      <svg viewBox="0 0 100 58" style="width:120px;flex-shrink:0;">
+        <path d="${arc(a0, 0)}" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="9" stroke-linecap="round"/>
+        ${frac > 0.005 ? `<path d="${arc(a0, a1)}" fill="none" stroke="${rate ? rate.c : '#7FD1FF'}" stroke-width="9" stroke-linecap="round"/>` : ''}
+        <text x="50" y="47" text-anchor="middle" font-size="17" font-weight="800" fill="#fff" font-family="monospace" id="speed-live">${S.running && S.phase === 'ping' ? '…' : (S.mbps != null ? (S.mbps >= 100 ? Math.round(S.mbps) : S.mbps.toFixed(1)) : '—')}</text>
+        <text x="50" y="57" text-anchor="middle" font-size="7.5" fill="#B8C8DC">Mbps</text>
+      </svg>
+      <div style="flex:1;min-width:0;">
+        <div style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:700;color:#fff;"><i class="ti ti-gauge"></i> سرعة الإنترنت
+          <span style="margin-right:auto;font-size:10.5px;font-weight:600;padding:1px 8px;border-radius:9px;background:${off ? 'rgba(255,107,107,.25)' : 'rgba(56,201,139,.25)'};color:${off ? '#FFB3B3' : '#9FF0CC'};">● ${off ? 'مقطوع' : 'متصل'}</span></div>
+        <div style="font-size:11.5px;color:#B8C8DC;margin-top:4px;line-height:1.7;">
+          ${S.running ? (S.phase === 'ping' ? 'جاري قياس الاستجابة…' : 'جاري قياس سرعة التحميل…')
+            : S.error ? `<span style="color:#FFB3B3;">${escapeHtml(S.error)}</span>`
+            : S.at ? `التحميل: <b style="color:#fff;" class="mono">${S.mbps} Mbps</b> ${rate ? `<span style="color:${rate.c};font-weight:700;">(${rate.l})</span>` : ''}<br>الاستجابة من قاعدة البيانات: <b style="color:#fff;" class="mono">${S.ping} ms</b>`
+            : 'اضغط «اختبار» عشان تعرف سرعة النت في المحل'}
+        </div>
+      </div>
+      <button data-speed-run ${S.running ? 'disabled' : ''} style="background:#fff;color:#1B3352;border:none;border-radius:10px;padding:8px 14px;font-weight:700;font-size:12.5px;cursor:pointer;font-family:inherit;white-space:nowrap;">${S.running ? '<i class="ti ti-loader-2"></i>' : '<i class="ti ti-player-play"></i> اختبار'}</button>
+    </div>`;
+}
+document.addEventListener('click', e => { if (e.target.closest('[data-speed-run]')) runSpeedTest(); });
 
 async function recordLicenseInCrm(info, serialNo, note, extra) {
   const ref = info.p || currentProjectRef();
@@ -13248,6 +13657,7 @@ async function loadAlerts() {
   if (outOfStock.length > 0) alerts.push({ severity:'high', text:`${outOfStock.length} صنف نفد من المخزون تماماً`, target:'الاصناف' });
   if (nearLow.length > 0) alerts.push({ severity:'medium', text:`${nearLow.length} صنف وصل لحد إعادة الطلب`, target:'الاصناف' });
 
+  if (fxOn() && fxStale() && canSetFx()) alerts.push({ severity: 'medium', text: `💵 ما اتسجّل سعر ${fxName()} اليوم — اضغط عشان تحدّثه`, target: '__fx__' });
   // طلبات بضاعة من فروع أخرى / تحويلات بالطريق لفرعي
   if (state.branchesReady && (state.branches || []).length > 1) {
     try {
@@ -13774,6 +14184,10 @@ const SYSTEM_FEATURES = [
   { key:'currency_sub', type:'text', def:'هللة', label:'اسم الجزء الصغير من العملة' },
   { key:'currency_abbr_ar', type:'text', def:'ر.س', label:'اختصار العملة المحلية ع' },
   { key:'currency_abbr_en', type:'text', def:'SAR', label:'اختصار العملة المحلية E' },
+  { key:'fx_enabled', type:'bool', def:false, label:'💵 استخدام سعر الصرف (الدولار) — للدول اللي عملتها متذبذبة زي السودان' },
+  { key:'fx_name', type:'text', def:'الدولار', label:'اسم العملة الأجنبية لسعر الصرف' },
+  { key:'fx_symbol', type:'text', def:'$', label:'رمز العملة الأجنبية' },
+  { key:'fx_round', type:'select', def:'0', label:'تقريب سعر البيع بالعملة المحلية عند التحويل من الدولار', options:[['0','بدون تقريب'],['1','لأقرب 1'],['5','لأقرب 5'],['10','لأقرب 10'],['50','لأقرب 50'],['100','لأقرب 100'],['500','لأقرب 500'],['1000','لأقرب 1000']] },
   { key:'fiscal_start', type:'date', def:'', label:'بداية السنة المالية' },
   { key:'fiscal_end', type:'date', def:'', label:'نهاية السنة المالية' },
 ];
@@ -14366,6 +14780,8 @@ function readFormFromDom() {
   if (val('f-price') !== undefined) f.price = val('f-price');
   if (val('f-price2') !== undefined) f.price2 = val('f-price2');
   if (val('f-price3') !== undefined) f.price3 = val('f-price3');
+  if (val('f-price_usd') !== undefined) f.price_usd = val('f-price_usd');
+  if (val('f-cost_usd') !== undefined) f.cost_usd = val('f-cost_usd');
   if (val('f-discount_percent') !== undefined) f.discount_percent = val('f-discount_percent');
   if (val('f-vat_applicable') !== undefined) f.vat_applicable = val('f-vat_applicable') === 'true';
   if (val('f-pricing_method') !== undefined) f.pricing_method = val('f-pricing_method');
@@ -14402,7 +14818,7 @@ function openItemById(id) {
   const toStr = v => (v === null || v === undefined) ? '' : String(v);
   state.form = {
     ...emptyForm(), ...item,
-    cost: toStr(item.cost), price: toStr(item.price), price2: toStr(item.price2), price3: toStr(item.price3),
+    cost: toStr(item.cost), price: toStr(item.price), price2: toStr(item.price2), price3: toStr(item.price3), price_usd: toStr(item.price_usd), cost_usd: toStr(item.cost_usd),
     discount_percent: toStr(item.discount_percent), opening_cost: toStr(item.opening_cost), foreign_cost: toStr(item.foreign_cost),
     last_cost: toStr(item.last_cost), book_cost: toStr(item.book_cost),
     competitor1_price: toStr(item.competitor1_price), competitor2_price: toStr(item.competitor2_price), competitor3_price: toStr(item.competitor3_price),
@@ -14768,6 +15184,7 @@ function bindAppEvents() {
     el.onclick = async () => {
       state.showAlertsPanel = false;
       const target = el.dataset.alertTarget;
+      if (target === '__fx__') { state.showFx = true; render(); return; }
       if (target === '__transfers_reqs__' || target === '__transfers_inbound__') {
         await loadTransfers(); state.transferFilterStatus = target === '__transfers_reqs__' ? 'مطلوب' : 'مرسل';
         state.activeSection = '__transfers__'; render(); return;
@@ -16099,7 +16516,7 @@ function bindAppEvents() {
         if (!f.customer_id && !String(f.walkin_customer_name||'').trim()) { alert('اختر عميل مسجّل، أو اكتب اسم العميل'); document.getElementById('qt-walkin-name')?.focus(); return; }
         if (f.lines.length === 0) { alert('أضف صنف واحد على الأقل'); return; }
         const t = calcLineTotals(f);
-        const headerPayload = { customer_id:f.customer_id||null, walkin_customer_name: f.customer_id ? null : (String(f.walkin_customer_name||'').trim()||null), walkin_customer_mobile: f.customer_id ? null : (String(f.walkin_customer_mobile||'').trim()||null), customer_ref:f.customer_ref||null, quote_date:f.quote_date, valid_until:f.valid_until||null, discount:t.discount, notes:f.notes||null, subtotal:t.subtotal, tax_total:t.taxTotal, total:t.grandTotal, no_tax:!!f.no_tax };
+        const headerPayload = { customer_id:f.customer_id||null, walkin_customer_name: f.customer_id ? null : (String(f.walkin_customer_name||'').trim()||null), walkin_customer_mobile: f.customer_id ? null : (String(f.walkin_customer_mobile||'').trim()||null), customer_ref:f.customer_ref||null, quote_date:f.quote_date, valid_until:f.valid_until||null, discount:t.discount, notes:f.notes||null, subtotal:t.subtotal, tax_total:t.taxTotal, total:t.grandTotal, no_tax:!!f.no_tax, ...(fxOn() && fxRate() ? { exchange_rate: Number(f.exchange_rate) || fxRate() } : {}) };
         const lineRows = f.lines.map(l => { const sub=lineAmt(l), tax=sub*(Number(taxPctOf(l))/100); return { item_id:l.item_id, quantity:l.quantity, unit_price:l.unit_price, tax_percent:taxPctOf(l), tax_amount:tax, line_total:sub, total_with_tax:sub+tax }; });
         if (state.editingQuoteId) {
           const { error } = await sb.from('quotations').update(headerPayload).eq('id', state.editingQuoteId);
@@ -16561,9 +16978,7 @@ function bindAppEvents() {
           }
         }
         setBtnLoading(document.getElementById('sales-save'), true, 'جاري الحفظ');
-        const t = calcLineTotals(f);
-        const headerPayload = { invoice_type:f.invoice_type, customer_id:f.customer_id||null, walkin_customer_name: !f.customer_id ? (f.walkin_customer_name||null) : null, walkin_customer_tax_number: (!f.customer_id && !f.no_tax) ? (f.walkin_customer_tax_number||null) : null, walkin_customer_address: (!f.customer_id && !f.no_tax) ? (f.walkin_customer_address||null) : null, customer_ref:f.customer_ref||null, order_number:f.order_number||null, warehouse_id: f.warehouse_id||null, payment_method: f.payment_method||null, quotation_id:f.quotation_id||null, invoice_date:f.invoice_date, discount:t.discount, paid_amount:Number(f.paid_amount)||0, notes:f.notes||null, subtotal:t.subtotal, tax_total:t.taxTotal, total:t.grandTotal, no_tax:!!f.no_tax, sales_rep_id: f.sales_rep_id||null, customer_mobile: f.customer_mobile||null, payment_details: (f.payments||[]).length ? f.payments : null, customer_national_address: f.national_address && Object.values(f.national_address).some(Boolean) ? f.national_address : null };
-        const lineRows = f.lines.map(l => { const sub=lineAmt(l), tax=sub*(Number(taxPctOf(l))/100); return { item_id:l.item_id, quantity:l.quantity, unit_price:l.unit_price, discount_percent:Number(l.disc_pct)||0, tax_percent:taxPctOf(l), tax_amount:tax, line_total:sub, total_with_tax:sub+tax }; });
+        const { headerPayload, lineRows } = buildSalesPayload(f);
         if (state.editingSalesId) {
           const { error } = await sb.from('sales_invoices').update(headerPayload).eq('id', state.editingSalesId);
           if (error) { alert('خطأ بالحفظ:\n'+error.message); setBtnLoading(document.getElementById('sales-save'), false); return; }
@@ -21646,6 +22061,7 @@ function bindAppEvents() {
         location1: txt(f.location1), location2: txt(f.location2), location3: txt(f.location3), location4: txt(f.location4),
         shape: txt(f.shape), specs: txt(f.specs), usage_type: txt(f.usage_type), volume: txt(f.volume),
         cost: num(f.cost) || 0, price: Number(f.price), price2: num(f.price2), price3: num(f.price3),
+        ...(fxOn() ? { price_usd: num(f.price_usd), cost_usd: num(f.cost_usd) } : {}),
         discount_percent: num(f.discount_percent) || 0, vat_applicable: !!f.vat_applicable, pricing_method: f.pricing_method || 'fixed_value',
         competitor1_name: txt(f.competitor1_name), competitor1_price: num(f.competitor1_price),
         competitor2_name: txt(f.competitor2_name), competitor2_price: num(f.competitor2_price),
@@ -21954,7 +22370,17 @@ function handleGlobalShortcuts(ev) {
 
 async function init() {
   try {
-    const { data: license } = await sb.from('license_settings').select('*').eq('id', 1).maybeSingle();
+    // لو النت بطيء جداً أو معلّق (بدون رد) أكتر من 10 ثواني نعتبره مقطوع
+    const { data: license, error: licErr } = await Promise.race([
+      sb.from('license_settings').select('*').eq('id', 1).maybeSingle(),
+      new Promise(res => setTimeout(() => res({ data: null, error: { message: 'network timeout' } }), 10000)),
+    ]);
+    // بدون إنترنت: نفتح من النسخة المحفوظة في الجهاز (للبيع فقط)
+    if (licErr && (isNetError(licErr) || isOffline())) {
+      if (await startOfflineBoot()) { document.addEventListener('keydown', handleGlobalShortcuts); return; }
+      state.licenseExpired = true; state.licenseReason = 'ما في إنترنت — افتح البرنامج مرة واحدة بالنت على الجهاز ده عشان يشتغل بعدها بدون نت';
+      render(); return;
+    }
     state.licenseContact = license?.designer_contact || '';
     state.licenseSettings = license || {};
     if (!license?.serial) {
@@ -21975,7 +22401,9 @@ async function init() {
     if (branchPickNeeded() && !canAllBranches() && !state.profile?.active_branch_id) { state.branchPickOpen = true; state.branchPickClosable = false; }
   }
   installBranchPickDelegation();
+  await loadOfflineQueue();
   render();
+  if (state.session) { scheduleOfflineSnapshot(); if (OFF.queue.length) syncOfflineQueue(); }
   if (state.session) checkAndRunAutoBackup();
   if (state.session && isAdmin()) checkApiRowLimit(); // فحص النسخة الاحتياطية بالخلفية، بدون ما يأخّر ظهور الشاشة
   document.addEventListener('keydown', handleGlobalShortcuts);
