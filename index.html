@@ -1052,7 +1052,7 @@ function renderAuth() {
             <label style="font-size:12.5px;color:#3A3826;display:block;margin-bottom:5px;font-weight:500;">${t('username')}</label>
             <div style="position:relative;">
               <i class="ti ti-user" style="position:absolute;${isEn?'left':'right'}:12px;top:50%;transform:translateY(-50%);color:#8B8A7A;font-size:16px;"></i>
-              <input id="auth-email" type="text" class="input ${state.authError ? 'err' : ''}" placeholder="ahmad" style="padding-${isEn?'left':'right'}:36px;" />
+              <input id="auth-email" type="text" class="input ${state.authError ? 'err' : ''}" placeholder="ahmad" value="${escapeHtml(state.authUser || '')}" autocomplete="username" style="padding-${isEn?'left':'right'}:36px;" />
             </div>
           </div>
           <div>
@@ -1065,6 +1065,7 @@ function renderAuth() {
               </button>
             </div>
           </div>
+          <div id="auth-branch-box"></div>
           ${state.authError ? `<div class="err-text" style="display:flex;align-items:center;gap:5px;"><i class="ti ti-alert-circle"></i> ${state.authError}</div>` : ''}
           <button id="auth-submit" style="display:flex;align-items:center;justify-content:center;gap:8px;padding:12px 0;background:linear-gradient(135deg,#2C4A6E,#3D6389);color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;margin-top:6px;">
             ${state.authLoading ? t('checking') : `${t('login_btn')} <i class="ti ti-arrow-${isEn?'right':'left'}" style="font-size:16px;"></i>`}
@@ -1101,6 +1102,40 @@ function renderAuth() {
   </div>`;
 }
 
+async function fetchLoginBranches(username) {
+  const box = document.getElementById('auth-branch-box'); if (!box) return;
+  const u = String(username || '').trim().toLowerCase().replace(/@retailapp-users\.com$/, '');
+  if (u.length < 2) { box.innerHTML = ''; return; }
+  const { data, error } = await sb.rpc('login_branches', { p_username: u });
+  if (document.getElementById('auth-email')?.value.trim().toLowerCase().replace(/@retailapp-users\.com$/, '') !== u) return; // اتغيّر الاسم أثناء الطلب
+  if (error || !data || !Array.isArray(data.branches) || !data.branches.length) { box.innerHTML = ''; state.loginBranchInfo = null; return; }
+  state.loginBranchInfo = data;
+  let saved = null; try { saved = localStorage.getItem('coinsoft_branch_' + u); } catch (e) {}
+  const opts = data.branches.map(b => ({ v: b.id, l: b.name + (b.is_main ? ' ⭐' : '') }));
+  if (data.all) opts.push({ v: 'ALL', l: 'كل الفروع' });
+  const sel = opts.some(o => o.v === saved) ? saved : (opts.some(o => o.v === data.default) ? data.default : opts[0].v);
+  const isEn = state.lang === 'en';
+  box.innerHTML = `
+    <label style="font-size:12.5px;color:#3A3826;display:block;margin-bottom:5px;font-weight:500;">الفرع</label>
+    <div style="position:relative;">
+      <i class="ti ti-building-store" style="position:absolute;${isEn ? 'left' : 'right'}:12px;top:50%;transform:translateY(-50%);color:#8B8A7A;font-size:16px;pointer-events:none;"></i>
+      <select id="auth-branch" class="input" style="padding-${isEn ? 'left' : 'right'}:36px;" ${opts.length === 1 ? 'disabled' : ''}>
+        ${opts.map(o => `<option value="${o.v}" ${o.v === sel ? 'selected' : ''}>${escapeHtml(o.l)}</option>`).join('')}
+      </select>
+    </div>
+    ${opts.length === 1 ? '<div style="font-size:10.5px;color:#8B8A7A;margin-top:3px;">ده الفرع المسموح لك</div>' : ''}`;
+}
+// بعد الدخول: نطبّق الفرع اللي اختاره من القائمة (قاعدة البيانات تتأكد إنه مسموح له)
+async function applyLoginBranchChoice(rawUsername) {
+  const choice = state.loginBranchChoice; state.loginBranchChoice = null;
+  if (!choice || !state.profile) return false;
+  const id = choice === 'ALL' ? null : choice;
+  const { error } = await sb.rpc('set_active_branch', { p_branch: id });
+  if (error) { showToast(error.message || 'غير مسموح لك بهذا الفرع', 'error'); return false; }
+  state.profile.active_branch_id = id;
+  try { localStorage.setItem('coinsoft_branch_' + String(rawUsername).toLowerCase().replace(/@retailapp-users\.com$/, ''), choice); } catch (e) {}
+  return true;
+}
 function bindAuthEvents() {
   document.getElementById('lang-toggle-btn').onclick = () => { state.lang = state.lang === 'ar' ? 'en' : 'ar'; render(); };
   document.getElementById('auth-toggle-pw').onclick = () => {
@@ -1109,9 +1144,17 @@ function bindAuthEvents() {
     if (input.type === 'password') { input.type = 'text'; icon.className = 'ti ti-eye-off'; }
     else { input.type = 'password'; icon.className = 'ti ti-eye'; }
   };
+  // قائمة الفرع: تظهر بعد كتابة اسم المستخدم، وفيها فروعه المسموحة فقط
+  const userEl = document.getElementById('auth-email');
+  let lbTimer = null;
+  userEl.addEventListener('input', () => { clearTimeout(lbTimer); lbTimer = setTimeout(() => fetchLoginBranches(userEl.value), 450); });
+  if (userEl.value.trim()) fetchLoginBranches(userEl.value);
   document.getElementById('auth-submit').onclick = async () => {
     const rawUsername = document.getElementById('auth-email').value.trim();
     const password = document.getElementById('auth-password').value;
+    state.authUser = rawUsername;
+    const brSel = document.getElementById('auth-branch');
+    state.loginBranchChoice = brSel ? brSel.value : null;
     if (!rawUsername || !password) { state.authError = 'أدخل اسم المستخدم وكلمة المرور'; render(); return; }
     const email = rawUsername.includes('@') ? rawUsername : `${rawUsername.toLowerCase()}@retailapp-users.com`;
     state.authLoading = true; state.authError = ''; render();
@@ -1120,6 +1163,7 @@ function bindAuthEvents() {
       if (error) throw error;
       state.session = data.session;
       await loadProfile();
+      const branchApplied = await applyLoginBranchChoice(rawUsername);
       await loadItems();
       await loadCompany();
       await loadParties();
@@ -1127,8 +1171,8 @@ function bindAuthEvents() {
       await loadSalesInvoices();
       await loadWarehouses();
       await loadPaymentMethods();
-      if (branchPickNeeded()) { state.branchPickOpen = true; state.branchPickClosable = false; }
-      logActivity('تسجيل دخول');
+      if (!branchApplied && branchPickNeeded()) { state.branchPickOpen = true; state.branchPickClosable = false; }
+      logActivity('تسجيل دخول', userBranchId() ? branchName(userBranchId()) : '');
       loadAlerts().then(() => render()); // بالخلفية، ما نوقف تسجيل الدخول لحد ما يخلص
     } catch (e) {
       state.authError = translateAuthError(e.message);
@@ -4463,7 +4507,7 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
-const APP_VERSION = '2026.10.10-6';
+const APP_VERSION = '2026.10.11-1';
 function renderHomeSection() {
   const c = state.company || {};
   const phones = [
