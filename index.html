@@ -1702,6 +1702,226 @@ function buildSalesPayload(f) {
   const lineRows = f.lines.map(l => { const sub=lineAmt(l), tax=sub*(Number(taxPctOf(l))/100); return { item_id:l.item_id, quantity:l.quantity, unit_price:l.unit_price, discount_percent:Number(l.disc_pct)||0, tax_percent:taxPctOf(l), tax_amount:tax, line_total:sub, total_with_tax:sub+tax }; });
   return { headerPayload, lineRows, t };
 }
+
+// =====================================================================
+// إيصال حراري 80مم لفاتورة البيع (يُطبع بدل قوالب A4 لما حجم الورقة = إيصال)
+// =====================================================================
+function renderSalesReceipt(f) {
+  const c = state.company || {}; const t = calcLineTotals(f);
+  const cust = f.customer_id ? (state.parties || []).find(p => p.id === f.customer_id) : null;
+  const custName = cust?.name || f.walkin_customer_name || 'عميل نقدي';
+  const paid = Number(f.paid_amount) || 0, due = t.grandTotal - paid;
+  const cur = escapeHtml(feat('currency_abbr_ar') || '');
+  const noTax = f.no_tax || !taxOn();
+  const title = noTax ? 'فاتورة مبيعات' : (zatcaOn() ? 'فاتورة ضريبية مبسطة' : 'فاتورة ضريبية');
+  const row = (a, b, strong) => `<div style="display:flex;justify-content:space-between;gap:6px;${strong ? 'font-weight:800;font-size:13px;border-top:1px dashed #000;padding-top:3px;margin-top:2px;' : ''}"><span>${a}</span><span style="direction:ltr;">${b}</span></div>`;
+  const now = new Date();
+  return `<div id="si-receipt" class="print-only" style="width:${receiptWidthMm()}mm;margin:0 auto;font-family:Tahoma,Arial,sans-serif;font-size:${receiptWidthMm() < 60 ? 9.5 : 11}px;color:#000;line-height:1.45;direction:rtl;">
+    <div style="text-align:center;">
+      ${c.logo_url && c.print_show_logo !== false ? `<img src="${escapeHtml(c.logo_url)}" style="max-height:16mm;max-width:40mm;margin-bottom:2px;" onerror="this.remove()" />` : ''}
+      <div style="font-size:14px;font-weight:800;">${escapeHtml(c.name_ar || c.name_en || '')}</div>
+      ${c.address ? `<div style="font-size:10px;">${escapeHtml(c.address)}</div>` : ''}
+      ${c.phone ? `<div style="font-size:10px;direction:ltr;">${escapeHtml(c.phone)}</div>` : ''}
+      ${!noTax && c.tax_number ? `<div style="font-size:10px;">الرقم الضريبي: <span style="direction:ltr;">${escapeHtml(c.tax_number)}</span></div>` : ''}
+      <div style="margin-top:4px;font-size:12.5px;font-weight:800;border-top:1px dashed #000;border-bottom:1px dashed #000;padding:2px 0;">${title}</div>
+    </div>
+    <div style="margin:4px 0;font-size:10.5px;">
+      ${row('رقم الفاتورة', escapeHtml(f.invoice_number || ''))}
+      ${row('التاريخ', escapeHtml(f.invoice_date || '') + ' ' + now.toTimeString().slice(0, 5))}
+      ${row('العميل', escapeHtml(custName))}
+      ${row('النوع', escapeHtml(f.invoice_type || 'نقدي'))}
+    </div>
+    <table style="width:100%;border-collapse:collapse;font-size:10.5px;">
+      <thead><tr style="border-top:1px dashed #000;border-bottom:1px dashed #000;"><th style="text-align:right;padding:2px 0;">الصنف</th><th style="padding:2px 2px;">الكمية</th><th style="padding:2px 2px;">السعر</th><th style="text-align:left;padding:2px 0;">المجموع</th></tr></thead>
+      <tbody>${f.lines.map(l => { const sub = lineAmt(l); return `<tr><td colspan="4" style="padding-top:3px;font-weight:700;">${escapeHtml(l.item_name || '')}</td></tr>
+        <tr style="border-bottom:1px dotted #999;"><td style="font-size:9.5px;direction:ltr;text-align:right;">${escapeHtml(l.sku || '')}</td><td style="text-align:center;">${Number(l.quantity)}</td><td style="text-align:center;">${fmt(l.unit_price)}</td><td style="text-align:left;">${fmt(sub)}</td></tr>`; }).join('')}</tbody>
+    </table>
+    <div style="margin-top:4px;">
+      ${row('المجموع', fmt(t.subtotal))}
+      ${Number(t.discount) ? row('الخصم', fmt(t.discount)) : ''}
+      ${noTax ? '' : row(`الضريبة (${vatRate()}%)`, fmt(t.taxTotal))}
+      ${row('الإجمالي', fmt(t.grandTotal) + ' ' + cur, true)}
+      ${row('المدفوع', fmt(paid))}
+      ${due > 0.005 ? row('المتبقي', fmt(due)) : ''}
+    </div>
+    ${f.approved && c.print_show_qr !== false && !noTax ? `<div style="text-align:center;margin-top:6px;"><canvas id="si-qr-canvas-rc" style="width:28mm;height:28mm;"></canvas></div>` : ''}
+    <div style="text-align:center;font-size:10px;margin-top:5px;border-top:1px dashed #000;padding-top:3px;">${escapeHtml(c.print_footer_text || 'شكراً لتعاملكم معنا')}</div>
+  </div>`;
+}
+
+// عزل منطقة الطباعة وقت الطباعة: نخفي كل شي غيرها (display:none) ونخلي النوافذ الثابتة عادية،
+// عشان المتصفح ما يكرر النافذة في كل صفحة ولا يصغّر الفاتورة بسبب عناصر عريضة مخفية
+function isolatePrintArea() {
+  if (document.getElementById('print-list-overlay') || document.getElementById('bl-print-host')) return;
+  const area = document.getElementById('print-test-host') || Array.from(document.querySelectorAll('.print-area')).find(el => el.offsetParent !== null || getComputedStyle(el).position === 'fixed');
+  if (!area) return;
+  let st = document.getElementById('print-isolate-style');
+  if (!st) { st = document.createElement('style'); st.id = 'print-isolate-style'; document.head.appendChild(st);
+    st.textContent = `@media print {
+      .print-iso-hide { display: none !important; }
+      .print-iso-anc { position: static !important; inset: auto !important; transform: none !important; width: auto !important; max-width: none !important; height: auto !important; max-height: none !important; min-height: 0 !important; overflow: visible !important; padding: 0 !important; margin: 0 !important; background: #fff !important; box-shadow: none !important; border: none !important; display: block !important; }
+      .print-iso-area, .print-copy-clone { position: static !important; overflow: visible !important; max-height: none !important; }
+      html, body { width: auto !important; min-width: 0 !important; overflow: visible !important; }
+    }`; }
+  area.classList.add('print-iso-area');
+  let node = area;
+  while (node && node !== document.body) {
+    const parent = node.parentElement; if (!parent) break;
+    Array.from(parent.children).forEach(ch => { if (ch !== node && !ch.classList.contains('print-copy-clone') && !['STYLE', 'SCRIPT', 'LINK'].includes(ch.tagName)) ch.classList.add('print-iso-hide'); });
+    if (parent !== document.body) parent.classList.add('print-iso-anc');
+    node = parent;
+  }
+}
+function unisolatePrintArea() {
+  document.querySelectorAll('.print-iso-hide').forEach(e => e.classList.remove('print-iso-hide'));
+  document.querySelectorAll('.print-iso-anc').forEach(e => e.classList.remove('print-iso-anc'));
+  document.querySelectorAll('.print-iso-area').forEach(e => e.classList.remove('print-iso-area'));
+}
+// =====================================================================
+// 🖨️ صيانة الطباعة: فحص المشاكل وإصلاحها من داخل البرنامج
+//  • حجم ورق خاص بكل جهاز (الكاشير حراري، المكتب A4) — يتحفظ في الجهاز نفسه
+//  • صفحة تجربة، إصلاح تلقائي للإعدادات، تنظيف بقايا الطباعة، تحديث نسخة البرنامج
+// =====================================================================
+function devicePaper() { try { return localStorage.getItem('coinsoft_print_paper') || ''; } catch (e) { return ''; } }
+function setDevicePaper(v) { try { if (v) localStorage.setItem('coinsoft_print_paper', v); else localStorage.removeItem('coinsoft_print_paper'); } catch (e) {} }
+function printPaper() { return devicePaper() || state.company?.print_paper_size || 'a4'; }
+function isReceiptPaper() { return String(printPaper()).startsWith('receipt'); }
+function receiptWidthMm() { return printPaper() === 'receipt58' ? 48 : 72; }
+function receiptPageMm() { return printPaper() === 'receipt58' ? 58 : 80; }
+const PAPER_LABEL = { a4: 'A4 عادي', receipt: 'إيصال حراري 80مم', receipt58: 'إيصال حراري 58مم' };
+function printDiagnostics() {
+  const c = state.company || {}, out = [];
+  const add = (ok, title, fix, action) => out.push({ ok, title, fix, action });
+  const paper = printPaper();
+  add(true, `حجم الورق في الجهاز ده: ${PAPER_LABEL[paper] || paper}${devicePaper() ? ' (خاص بالجهاز)' : ' (حسب إعداد الشركة)'}`, 'لو طابعتك A4 اختار A4، ولو طابعة كاشير اختار الحراري.');
+  const copies = Number(c.print_copies || 1);
+  add(copies <= 1, copies > 1 ? `عدد النسخ الافتراضي ${copies} — كل طباعة بتطلع ${copies} ورقة` : 'عدد النسخ: 1', 'لو ما محتاج نسخ زيادة، الإصلاح التلقائي بيرجّعها 1.');
+  const m = Number(c.print_margin_mm ?? 10);
+  add(m >= 3 && m <= 20, `الهامش: ${m} مم`, 'الهامش المناسب بين 5 و15 مم.');
+  const hh = Number(c.print_header_height ?? 25), fh = Number(c.print_footer_height ?? 20);
+  add(hh <= 60 && fh <= 50, `ارتفاع الترويسة ${hh} مم، والتذييل ${fh} مم`, 'ترويسة أو تذييل طويل بيدفع الفاتورة لصفحة تانية.');
+  const zoom = Math.round((window.outerWidth / window.innerWidth) * 100);
+  add(!(zoom > 0) || Math.abs(zoom - 100) < 8, `تكبير المتصفح: ${zoom > 0 ? zoom + '%' : 'غير معروف'}`, 'اضغط Ctrl + 0 عشان ترجّع التكبير 100%.');
+  const leftovers = document.querySelectorAll('#sales-template-hide-style, #print-custom-vars-style, #draft-watermark-style, #logo-watermark-style, .print-copy-clone, .print-iso-hide, .print-iso-anc').length;
+  add(!leftovers, leftovers ? `في ${leftovers} بقايا من طباعة سابقة ما اتنظفت` : 'ما في بقايا من طباعة سابقة', 'زر «تنظيف» بيشيلها.', 'clean');
+  if (c.logo_url) add(!state.printLogoBroken, state.printLogoBroken ? 'شعار الشركة ما بيفتح (الرابط خربان)' : 'شعار الشركة شغال', 'غيّر الشعار من بيانات الشركة.');
+  add(navigator.onLine !== false, navigator.onLine === false ? 'ما في إنترنت — الشعار والخطوط ممكن ما تظهر' : 'الإنترنت شغال');
+  return out;
+}
+function renderPrintDoctor() {
+  const diags = printDiagnostics(), bad = diags.filter(d => !d.ok).length, cur = devicePaper();
+  const opt = (v, l) => `<button data-pd-paper="${v}" style="flex:1;min-width:110px;padding:10px 8px;border-radius:10px;cursor:pointer;font-family:inherit;font-size:12.5px;font-weight:700;border:2px solid ${cur === v ? '#1B3352' : '#D8D4C4'};background:${cur === v ? '#1B3352' : '#fff'};color:${cur === v ? '#fff' : '#3A3826'};">${l}</button>`;
+  return `
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.45);display:flex;align-items:center;justify-content:center;padding:16px;z-index:1200;">
+    <div style="background:#fff;border-radius:14px;width:100%;max-width:640px;max-height:92vh;overflow-y:auto;box-shadow:0 20px 50px rgba(0,0,0,0.3);">
+      <div style="background:linear-gradient(135deg,#1B3352,#2C4A6E);color:#fff;padding:16px 18px;display:flex;align-items:center;gap:10px;">
+        <i class="ti ti-printer" style="font-size:26px;"></i>
+        <div style="flex:1;"><div style="font-weight:700;font-size:16px;">صيانة الطباعة</div><div style="font-size:12px;opacity:.85;">${bad ? `⚠️ في ${bad} حاجة محتاجة انتباه` : '✓ كل الفحوصات سليمة'}</div></div>
+        <button data-pd-close style="background:none;border:none;color:#fff;font-size:20px;cursor:pointer;"><i class="ti ti-x"></i></button>
+      </div>
+      <div style="padding:16px 18px;">
+        <div style="font-size:13px;font-weight:700;color:#1B3352;margin-bottom:8px;">1) حجم الورق في الجهاز ده</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+          ${opt('', `حسب الشركة (${PAPER_LABEL[state.company?.print_paper_size || 'a4'] || 'A4'})`)}${opt('a4', '📄 A4 عادي')}${opt('receipt', '🧾 حراري 80مم')}${opt('receipt58', '🧾 حراري 58مم')}
+        </div>
+        <div style="font-size:11px;color:#8B8A7A;margin-bottom:14px;">الإعداد ده بيتحفظ في الجهاز ده بس، يعني الكاشير يطبع حراري، والمكتب يطبع A4.</div>
+
+        <div style="font-size:13px;font-weight:700;color:#1B3352;margin-bottom:8px;">2) الفحص</div>
+        <div style="border:1px solid #E4E2DA;border-radius:10px;overflow:hidden;margin-bottom:14px;">
+          ${diags.map((d, i) => `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 12px;${i ? 'border-top:1px solid #EEE;' : ''}background:${d.ok ? '#fff' : '#FFF8EC'};">
+            <span style="font-size:15px;line-height:1.3;">${d.ok ? '✅' : '⚠️'}</span>
+            <div style="flex:1;font-size:12.5px;"><div style="font-weight:600;color:#1F2421;">${escapeHtml(d.title)}</div>${!d.ok ? `<div style="font-size:11.5px;color:#8A5A12;">${escapeHtml(d.fix)}</div>` : ''}</div>
+            ${d.action === 'clean' && !d.ok ? `<button data-pd-clean class="btn" style="padding:3px 10px;font-size:11.5px;">تنظيف</button>` : ''}
+          </div>`).join('')}
+        </div>
+
+        <div style="font-size:13px;font-weight:700;color:#1B3352;margin-bottom:8px;">3) أدوات الإصلاح</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px;">
+          <button data-pd-test class="btn primary" style="padding:10px;"><i class="ti ti-file-check"></i> طباعة صفحة تجربة</button>
+          <button data-pd-clean class="btn" style="padding:10px;"><i class="ti ti-eraser"></i> تنظيف بقايا الطباعة</button>
+          ${isAdmin() ? `<button data-pd-reset class="btn" style="padding:10px;background:#FFF4E0;border-color:#E8C27A;"><i class="ti ti-adjustments-check"></i> إصلاح تلقائي للإعدادات</button>` : ''}
+          <button data-pd-refresh class="btn" style="padding:10px;"><i class="ti ti-refresh"></i> تحديث البرنامج لآخر نسخة</button>
+        </div>
+
+        <div style="background:#F4F8FC;border:1px solid #DCE6F2;border-radius:10px;padding:10px 12px;font-size:12px;color:#2C3E50;line-height:1.9;">
+          <b>💡 في نافذة الطباعة نفسها (Chrome):</b><br>
+          • <b>المقياس / Scale</b>: خليه «افتراضي» (Default)، ما «ملائمة للصفحة».<br>
+          • <b>الهوامش</b>: «افتراضي».<br>
+          • فعّل <b>رسومات الخلفية</b> (Background graphics) عشان الألوان تطلع.<br>
+          • الطابعة الحرارية: اختار حجم الورق <b>80mm</b> أو <b>58mm</b> من «إعدادات إضافية».<br>
+          • لو الطباعة بطيئة أو بتعلّق: اقفل البرنامج وافتحه تاني، أو استخدم زر «تحديث البرنامج».
+        </div>
+        <div style="font-size:10.5px;color:#A9A48C;margin-top:8px;text-align:center;">إصدار البرنامج: ${typeof APP_VERSION !== 'undefined' ? APP_VERSION : ''}</div>
+      </div>
+    </div>
+  </div>`;
+}
+function cleanPrintLeftovers() {
+  document.querySelectorAll('#sales-template-hide-style, #print-custom-vars-style, #draft-watermark-style, #logo-watermark-style, #print-test-host').forEach(e => e.remove());
+  document.querySelectorAll('.print-copy-clone').forEach(e => e.remove());
+  if (typeof unisolatePrintArea === 'function') unisolatePrintArea();
+  document.querySelectorAll('style').forEach(st => { if (/@page\s*\{\s*size:\s*(80|58)mm|@page\s*\{\s*size:\s*A4 (portrait|landscape);\s*margin/.test(st.textContent) && !st.id) st.remove(); });
+}
+function printTestPage() {
+  cleanPrintLeftovers();
+  const rc = isReceiptPaper(), w = rc ? receiptWidthMm() + 'mm' : '100%', c = state.company || {};
+  const host = document.createElement('div');
+  host.id = 'print-test-host'; host.className = 'print-area';
+  host.style.cssText = 'position:fixed;left:-99999px;top:0;background:#fff;';
+  host.innerHTML = `<div class="print-only" style="width:${w};margin:0 auto;font-family:Tahoma,Arial,sans-serif;color:#000;">
+    <div style="border:2px dashed #000;padding:${rc ? '3mm' : '8mm'};text-align:center;">
+      <div style="font-size:${rc ? 14 : 22}px;font-weight:800;">🖨️ صفحة تجربة</div>
+      <div style="font-size:${rc ? 11 : 14}px;margin:4px 0;">${escapeHtml(c.name_ar || c.name_en || 'Coin Soft ERP')}</div>
+      <div style="font-size:${rc ? 10 : 12}px;">الورق: <b>${escapeHtml(PAPER_LABEL[printPaper()] || printPaper())}</b> · ${new Date().toLocaleString('ar-SA-u-ca-gregory-nu-latn')}</div>
+      <div style="display:flex;justify-content:space-between;margin:6mm 0 2mm;font-size:10px;"><span>◀ يمين</span><span>منتصف</span><span>يسار ▶</span></div>
+      <div style="height:${rc ? 6 : 10}mm;background:linear-gradient(90deg,#000 0 10%,#555 10% 20%,#999 20% 30%,#ccc 30% 40%,#fff 40% 60%,#1B3352 60% 70%,#C0392B 70% 80%,#0F6E56 80% 90%,#BA7517 90%);border:1px solid #000;"></div>
+      <table style="width:100%;border-collapse:collapse;margin-top:4mm;font-size:${rc ? 10 : 12}px;"><tr>${['الصنف', 'الكمية', 'السعر', 'المجموع'].map(h => `<th style="border:1px solid #000;padding:2px;">${h}</th>`).join('')}</tr>
+        <tr><td style="border:1px solid #000;padding:2px;">صنف تجريبي</td><td style="border:1px solid #000;">2</td><td style="border:1px solid #000;">10.00</td><td style="border:1px solid #000;">20.00</td></tr></table>
+      <div style="font-size:${rc ? 10 : 12}px;margin-top:4mm;line-height:1.7;text-align:right;">
+        ✓ لو <b>الإطار المنقّط ظاهر كامل</b> من الأربعة جهات، الطباعة سليمة.<br>
+        ✗ لو الإطار مقطوع: غيّر حجم الورق في صيانة الطباعة، وخلّي المقياس «افتراضي» في نافذة الطباعة.<br>
+        ✗ لو الألوان ما ظهرت: فعّل «رسومات الخلفية».
+      </div>
+    </div></div>`;
+  document.body.appendChild(host);
+  state.showPrintDoctor = false; render();
+  setTimeout(() => { window.print(); setTimeout(() => host.remove(), 1500); }, 150);
+}
+async function autoFixPrintSettings() {
+  if (!isAdmin()) return;
+  if (!confirm('الإصلاح التلقائي بيرجّع إعدادات الطباعة للقيم الآمنة:\n• الهامش 10 مم\n• عدد النسخ 1\n• الاتجاه عمودي\n• الترويسة 25 مم والتذييل 20 مم\n\nالألوان والشعار والنصوص ما بتتغيّر. تكمل؟')) return;
+  const patch = { print_margin_mm: 10, print_copies: 1, print_orientation: 'portrait', print_header_height: 25, print_footer_height: 20 };
+  let { error } = await sb.from('company_settings').update(patch).eq('id', state.company?.id ?? 1);
+  if (error && /column/i.test(error.message)) {
+    // نسخ قديمة ما فيها بعض الخانات: نحاول بالخانات الأساسية بس
+    ({ error } = await sb.from('company_settings').update({ print_margin_mm: 10, print_copies: 1 }).eq('id', state.company?.id ?? 1));
+  }
+  if (error) { showToast('فشل الإصلاح: ' + error.message, 'error'); return; }
+  Object.assign(state.company, patch);
+  state.salesPrintTemplate = '1';
+  cleanPrintLeftovers();
+  logActivity('إصلاح تلقائي لإعدادات الطباعة', '');
+  showToast('✓ تم إصلاح إعدادات الطباعة'); render();
+}
+async function refreshAppVersion() {
+  if (!confirm('بيتم مسح النسخة المحفوظة من البرنامج في الجهاز وتحميل آخر نسخة. بياناتك ما بتتأثر. تكمل؟')) return;
+  try { if ('caches' in window) { const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); } } catch (e) {}
+  try { if (navigator.serviceWorker) { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(r => r.update().catch(() => {}))); } } catch (e) {}
+  location.reload();
+}
+document.addEventListener('click', e => {
+  const t = e.target;
+  if (t.closest('[data-pd-close]')) { state.showPrintDoctor = false; render(); return; }
+  const pp = t.closest('[data-pd-paper]'); if (pp) { setDevicePaper(pp.dataset.pdPaper); showToast('✓ حجم الورق في الجهاز ده: ' + (PAPER_LABEL[printPaper()] || printPaper())); render(); return; }
+  if (t.closest('[data-pd-clean]')) { cleanPrintLeftovers(); showToast('✓ تم تنظيف بقايا الطباعة'); render(); return; }
+  if (t.closest('[data-pd-test]')) { printTestPage(); return; }
+  if (t.closest('[data-pd-reset]')) { autoFixPrintSettings(); return; }
+  if (t.closest('[data-pd-refresh]')) { refreshAppVersion(); return; }
+  if (t.closest('[data-open-print-doctor]')) { checkPrintLogo(); state.showPrintDoctor = true; render(); }
+}, true);
+// فحص الشعار مرة واحدة (لو الرابط خربان بنوضّح في الفحص)
+function checkPrintLogo() { const u = state.company?.logo_url; if (!u || state.printLogoChecked === u) return; state.printLogoChecked = u; const im = new Image(); im.onload = () => { state.printLogoBroken = false; }; im.onerror = () => { state.printLogoBroken = true; }; im.src = u; }
+
 function newSalesForm() {
   return { invoice_number:'', invoice_type:'نقدي', price_mode:'قبل الضريبة', default_tax:String(vatRate()), no_tax:!taxOn(), customer_id:'', walkin_customer_name:'', walkin_customer_tax_number:'', walkin_customer_address:'', cash_customer_mode:'walkin', customer_ref:'', order_number:'', warehouse_id: defaultWarehouseId(), quotation_id:null, quotation_number_display:'', invoice_date:new Date().toISOString().slice(0,10), discount:'0', paid_amount:'0', notes:'', lines:[], approved:false, sales_rep_id:'', customer_mobile:'', national_address:{}, payments:[] };
 }
@@ -2151,19 +2371,22 @@ function branchOptions() {
   const act = (state.branches || []).filter(b => b.active !== false);
   if (canAllBranches()) return act;
   const extra = Array.isArray(state.profile.allowed_branches) ? state.profile.allowed_branches : [];
-  return act.filter(b => b.id === state.profile.branch_id || extra.includes(b.id));
+  const home = homeBranchId();
+  return act.filter(b => b.id === home || extra.includes(b.id));
 }
+// كل الفروع: المدير والمصمم بس. الموظف = فرعه (غير المربوط = الرئيسي) + الفروع اللي سمح بيها المدير
 function canAllBranches() {
   const p = state.profile; if (!p) return false;
-  return isAdmin() || (!p.branch_id && !(Array.isArray(p.allowed_branches) && p.allowed_branches.length));
+  return isAdmin() || !!p.is_support;
 }
+function homeBranchId() { const p = state.profile; return (p && p.branch_id) || mainBranchId(); }
 // فرع العمل الحالي (اللي اختاره عند الدخول). null = كل الفروع
 function userBranchId() {
   if (!state.profile || !state.branchesReady) return null;
   const a = state.profile.active_branch_id;
   if (a && branchOptions().some(b => b.id === a)) return a;
   if (canAllBranches()) return null;
-  return state.profile.branch_id || branchOptions()[0]?.id || null;
+  return homeBranchId() || branchOptions()[0]?.id || null;
 }
 // حد الفروع من السيريال (b): السيريال القديم بدونه = فرع واحد (الرئيسي)، 0 = غير محدود
 function branchLimit() { const b = state.licenseInfo ? state.licenseInfo.b : undefined; return b == null ? 1 : Number(b) || 0; }
@@ -2305,7 +2528,7 @@ function withBranchQty(fn) {
 }
 // رصيد الصنف بالفروع الثانية (للعرض فقط)
 function itemQtyOtherBranches(it) {
-  if (!isBranchUser() || !state.whStock || !it) return [];
+  if (!isBranchUser() || !state.whStock || !it || !hasPerm('other_branches_stock', 'can_read')) return [];
   const m = state.whStock[it.id] || {}, my = userBranchId(), agg = {};
   state.warehouses.forEach(w => { if (w.branch_id && w.branch_id !== my && Number(m[w.id] || 0) > 0) agg[w.branch_id] = (agg[w.branch_id] || 0) + Number(m[w.id]); });
   return Object.entries(agg).map(([bid, q]) => ({ name: branchName(bid) || 'فرع', qty: q }));
@@ -2629,6 +2852,7 @@ function hasPerm(screenKey, action) {
   if (isAdmin()) return true;
   const perms = state.myPermissions?.[screenKey];
   if (perms && perms[action] !== null && perms[action] !== undefined) return !!perms[action];
+  if (screenKey === 'other_branches_stock') return false;           // بدون منح صريح من المدير = ممنوع
   // بدون إعداد في المصفوفة: الاعتماد والإلغاء حسب خيار «اعتماد الفواتير والسندات» في المستخدمين، والباقي مسموح
   if (action === 'can_approve' || action === 'can_delete') return !!state.profile?.can_approve;
   return true;
@@ -2816,6 +3040,7 @@ const SUBMENUS = {
     { label: 'الفروع (المحلات)', target: '__branches__', icon: 'ti-building-store' },
     { label: 'طرق الدفع', target: '__payment_methods__', icon: 'ti-credit-card' },
     { label: 'إعدادات الطباعة', target: '__print_settings__', icon: 'ti-printer' },
+    { label: '🖨️ صيانة الطباعة', target: '__print_doctor__', icon: 'ti-tool' },
     { header: 'المستخدمون', icon: 'ti-users' },
     { label: 'المستخدمون والصلاحيات', target: '__users__', icon: 'ti-user-cog' },
     { label: 'الاشتراك والتجديد', target: '__renew__', icon: 'ti-rosette-discount-check' },
@@ -2928,6 +3153,7 @@ function renderApp() {
   ${state.showRenew ? renderRenewModal() : ''}
   ${state.showFx ? renderFxModal() : ''}
   ${state.showExpiry ? renderExpiryModal() : ''}
+  ${state.showPrintDoctor ? renderPrintDoctor() : ''}
   ${state.showOffQueue ? renderOfflineQueueModal() : ''}
   ${state.showReportDesigner ? renderReportDesignerModal() : ''}
   ${state.showFixedAssets ? renderFixedAssetsModal() : ''}
@@ -4627,7 +4853,7 @@ function homeShortcut(icon, label, target) {
     <span style="font-size:12px;color:#fff;font-weight:500;">${label}</span>
   </button>`;
 }
-const APP_VERSION = '2026.10.11-9';
+const APP_VERSION = '2026.10.19-1';
 function renderHomeSection() {
   const c = state.company || {};
   const phones = [
@@ -5865,11 +6091,11 @@ function renderSalesFormModal() {
             <label class="sx-lbl">ربح الفاتورة</label>
             <input class="sx-in sx-ro mono" style="color:${invoiceProfit>=0?'#0F6E56':'#C0392B'};font-weight:700;" value="${fmt(invoiceProfit)}" disabled />
             <label class="sx-lbl">تصميم الطباعة</label>
-            <select id="si-print-template" class="sx-in">
+            <div style="display:flex;gap:6px;align-items:center;"><select id="si-print-template" class="sx-in">
               <option value="1" ${state.salesPrintTemplate!=='2'&&state.salesPrintTemplate!=='3'?'selected':''}>كلاسيكي تفصيلي</option>
               <option value="2" ${state.salesPrintTemplate==='2'?'selected':''}>بسيط موجز</option>
               <option value="3" ${state.salesPrintTemplate==='3'?'selected':''}>رسمي فخم (متوافق مع الزكاة)</option>
-            </select>
+            </select><button type="button" data-open-print-doctor class="no-print" title="صيانة الطباعة" style="border:1px solid #ACA899;background:#fff;border-radius:4px;cursor:pointer;padding:2px 8px;white-space:nowrap;font-family:inherit;font-size:11.5px;"><i class="ti ti-tool"></i> صيانة الطباعة</button></div>
             <label class="sx-lbl">ملاحظات</label>
             <textarea id="si-notes" class="sx-in" style="grid-column:2 / span 3;height:60px;resize:vertical;" ${dis}>${escapeHtml(f.notes||'')}</textarea>
             <span id="si-import-status" style="grid-column:1 / span 4;font-size:11px;color:#5F5E5A;"></span>
@@ -5993,6 +6219,7 @@ function renderSalesFormModal() {
       </div>
 
       <!-- قالب 2: بسيط موجز — بدون جداول ملوّنة، تنسيق نصي مباشر -->
+      ${isReceiptPaper() ? renderSalesReceipt(f) : ''}
       <div id="si-tpl2" class="print-only" style="font-family:${state.company?.print_font||'IBM Plex Sans Arabic'},sans-serif;">
         <div style="background:linear-gradient(135deg,#1B3352,#2C4A6E);padding:24px 28px;color:#fff;position:relative;overflow:hidden;">
           <div style="position:absolute;top:-40px;left:-40px;width:140px;height:140px;border-radius:50%;background:rgba(255,255,255,0.06);"></div>
@@ -11003,14 +11230,14 @@ function renderUsersModal() {
             ${state.branchesReady && state.branches.length ? `<div style="padding:0 8px 8px;display:flex;align-items:center;gap:8px;font-size:11.5px;color:#1B3352;">
               <i class="ti ti-building-store"></i><span style="font-weight:500;">الفرع:</span>
               <select data-branch-for="${u.id}" class="input" style="padding:3px 6px;font-size:11.5px;max-width:200px;" ${u.is_support ? 'disabled title="المصمم يشوف كل الفروع"' : ''}>
-                <option value="">كل الفروع</option>
+                <option value="">${u.role === 'admin' || u.is_support ? 'كل الفروع' : 'الفرع الرئيسي (افتراضي)'}</option>
                 ${state.branches.map(b => `<option value="${b.id}" ${u.branch_id === b.id ? 'selected' : ''}>${escapeHtml(b.name)}</option>`).join('')}
               </select>
-              <span style="color:#8B8A7A;">${u.role === 'admin' || u.is_support ? 'المدير يختار أي فرع عند الدخول' : u.branch_id ? ((u.allowed_branches || []).length ? 'يختار الفرع عند الدخول' : 'يدخل على فرعه مباشرة') : 'يشوف كل الفروع'}</span>
+              <span style="color:#8B8A7A;">${u.role === 'admin' || u.is_support ? 'المدير يختار أي فرع عند الدخول' : ((u.allowed_branches || []).length ? 'يتنقل بين فرعه والفروع المسموحة' : 'يدخل على فرعه مباشرة (بدون تنقل)')}</span>
             </div>
-            ${u.branch_id && u.role !== 'admin' && !u.is_support && state.branches.filter(b => b.id !== u.branch_id && b.active !== false).length ? `<div style="padding:0 8px 8px;display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;font-size:11.5px;color:#1B3352;">
-              <span style="font-weight:500;"><i class="ti ti-arrows-exchange"></i> فروع إضافية يقدر يشتغل فيها:</span>
-              ${state.branches.filter(b => b.id !== u.branch_id && b.active !== false).map(b => `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" data-allow-branch="${b.id}" data-allow-user="${u.id}" ${(u.allowed_branches || []).includes(b.id) ? 'checked' : ''} /> ${escapeHtml(b.name)}</label>`).join('')}
+            ${u.role !== 'admin' && !u.is_support && state.branches.filter(b => b.id !== (u.branch_id || mainBranchId()) && b.active !== false).length ? `<div style="padding:0 8px 8px;display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;font-size:11.5px;color:#1B3352;">
+              <span style="font-weight:500;"><i class="ti ti-arrows-exchange"></i> السماح بالتنقل إلى:</span>
+              ${state.branches.filter(b => b.id !== (u.branch_id || mainBranchId()) && b.active !== false).map(b => `<label style="display:flex;align-items:center;gap:4px;cursor:pointer;"><input type="checkbox" data-allow-branch="${b.id}" data-allow-user="${u.id}" ${(u.allowed_branches || []).includes(b.id) ? 'checked' : ''} /> ${escapeHtml(b.name)}</label>`).join('')}
             </div>` : ''}` : ''}
             </fieldset>
             </div>`).join('')}
@@ -14440,6 +14667,8 @@ const ACCOUNT_ROLES = [
   { group:'المخزون والتكلفة', key:'cogs', label:'حساب تكلفة المبيعات', def:'5101' },
   { group:'المخزون والتكلفة', key:'stock_gain', label:'حساب إيراد فروقات الجرد (زيادة)', def:'4201' },
   { group:'المخزون والتكلفة', key:'stock_loss', label:'حساب خسائر فروقات الجرد (نقص)', def:'5402' },
+  { group:'الفروع', key:'inter_branch', label:'حساب جاري الفروع (بضاعة محوّلة بين الفروع)', def:'1106' },
+  { group:'الفروع', key:'transfer_shortage', label:'حساب عجز تحويلات بين الفروع (نقص عند الاستلام)', def:'5404' },
   { group:'الضريبة', key:'output_vat', label:'حساب ضريبة المخرجات (المبيعات)', def:'2102' },
   { group:'الضريبة', key:'input_vat', label:'حساب ضريبة المدخلات (المشتريات)', def:'1104' },
   { group:'سندات التسوية', key:'settlement_expense', label:'حساب مصروف تسوية الذمم', def:'5403' },
@@ -15594,6 +15823,7 @@ function bindAppEvents() {
       const target = btn.dataset.submenuTarget || btn.dataset.submenu;
       if (!canOpenTarget(target)) { showToast('ما عندك صلاحية فتح هذه الشاشة — اطلبها من المدير', 'error'); return; }
       if (target === '__expiry__') { state.openDropdown = null; openExpiryReport(); return; }
+      if (target === '__print_doctor__') { state.openDropdown = null; checkPrintLogo(); state.showPrintDoctor = true; render(); return; }
       if (target === '__report_sales_invoices__') { openInvStmt('sales'); return; }
       if (target === '__item_sale_prices__') { if (!state.parties?.length) await loadParties(); openPriceHistory('', 'report'); return; }
       if (target === '__sys_features__' || target === '__account_mapping__') {
@@ -16989,6 +17219,10 @@ function bindAppEvents() {
       const c = state.company || {};
       const tlv = buildZatcaTLV(c.name_ar||'', c.tax_number||'', new Date().toISOString(), t.grandTotal, t.taxTotal);
       renderQRInto('si-qr-canvas-preview', tlv, invoiceQrText(f, t, 'فاتورة'));
+    }
+    if (document.getElementById('si-qr-canvas-rc')) {
+      const f = state.salesForm; const t = calcLineTotals(f); const c = state.company || {};
+      renderQRInto('si-qr-canvas-rc', buildZatcaTLV(c.name_ar||'', c.tax_number||'', new Date().toISOString(), t.grandTotal, t.taxTotal), invoiceQrText(f, t, 'فاتورة'));
     }
     if (document.getElementById('si-qr-canvas-tpl3')) {
       const f = state.salesForm;
@@ -22758,11 +22992,20 @@ async function init() {
   let printSizeStyleEl = null;
   let printCopyClones = [];
   window.addEventListener('beforeprint', () => {
-    const paperSize = state.company?.print_paper_size;
+    const paperSize = printPaper();
     const marginMm = state.company?.print_margin_mm ?? 10;
     printSizeStyleEl = document.createElement('style');
-    if (paperSize === 'receipt') {
-      printSizeStyleEl.textContent = `@page { size: 80mm auto; margin: ${Math.min(marginMm,10)}mm; } @media print { body, .print-area { font-size: 11px !important; } .print-area { max-width: 74mm !important; width: 74mm !important; } }`;
+    const rcEl = document.getElementById('print-test-host') ? null : document.getElementById('si-receipt');
+    if (isReceiptPaper() && rcEl) {
+      // إيصال فاتورة البيع: نقيس طوله ونخلي الورقة على قده بالظبط (80مم × الطول)
+      const prev = rcEl.style.cssText;
+      rcEl.style.cssText = prev + ';display:block !important;position:absolute;visibility:hidden;left:-9999px;top:0;';
+      const hMm = Math.ceil(rcEl.offsetHeight * 25.4 / 96) + 12;
+      rcEl.style.cssText = prev;
+      printSizeStyleEl.textContent = `@page { size: ${receiptPageMm()}mm ${Math.max(60, hMm)}mm; margin: 3mm 4mm; } @media print { .print-area { width: ${receiptWidthMm()}mm !important; max-width: ${receiptWidthMm()}mm !important; padding: 0 !important; margin: 0 !important; } }`;
+    } else if (isReceiptPaper()) {
+      const testHost = document.getElementById('print-test-host');
+      printSizeStyleEl.textContent = `@page { size: ${receiptPageMm()}mm ${testHost ? 140 : 297}mm; margin: 3mm; } @media print { body, .print-area { font-size: 11px !important; } .print-area { max-width: ${receiptWidthMm() + 2}mm !important; width: ${receiptWidthMm() + 2}mm !important; } }`;
     } else {
       const orientation = state.company?.print_orientation === 'landscape' ? 'landscape' : 'portrait';
       printSizeStyleEl.textContent = `@page { size: A4 ${orientation}; margin: ${marginMm}mm; }`;
@@ -22774,8 +23017,8 @@ async function init() {
     if (state.salesPrintTemplate) {
       templateHideStyle = document.createElement('style');
       templateHideStyle.id = 'sales-template-hide-style';
-      const allIds = ['si-tpl1-a', 'si-tpl1-b', 'si-lines-table-wrap', 'si-tpl2', 'si-tpl3'];
-      const activeIds = state.salesPrintTemplate === '2' ? ['si-tpl2'] : state.salesPrintTemplate === '3' ? ['si-tpl3'] : ['si-tpl1-a', 'si-tpl1-b', 'si-lines-table-wrap'];
+      const allIds = ['si-tpl1-a', 'si-tpl1-b', 'si-lines-table-wrap', 'si-tpl2', 'si-tpl3', 'si-receipt'];
+      const activeIds = rcEl && isReceiptPaper() ? ['si-receipt'] : state.salesPrintTemplate === '2' ? ['si-tpl2'] : state.salesPrintTemplate === '3' ? ['si-tpl3'] : ['si-tpl1-a', 'si-tpl1-b', 'si-lines-table-wrap'];
       const hideIds = allIds.filter(id => !activeIds.includes(id));
       templateHideStyle.textContent = hideIds.map(id => `#${id}`).join(', ') + ' { display: none !important; }';
       document.head.appendChild(templateHideStyle);
@@ -22852,6 +23095,7 @@ async function init() {
         }
       }
     }
+    isolatePrintArea();
   });
   window.addEventListener('afterprint', () => {
     if (printSizeStyleEl) { printSizeStyleEl.remove(); printSizeStyleEl = null; }
@@ -22865,6 +23109,7 @@ async function init() {
     if (logoWmEl) logoWmEl.remove();
     printCopyClones.forEach(c => c.remove());
     printCopyClones = [];
+    unisolatePrintArea();
   });
 }
 sb.auth.onAuthStateChange((event, session) => {
